@@ -76,10 +76,6 @@ Selection reads always read in full.
 - Holds the last word between words.
 - Stops 2 s after the app reports the reading ended, or after 60 s with no playback. A stall while synthesis catches up does not stop it.
 
-## Double playback rule
-
-The repo's Claude Code hook (`scripts/claude-copyspeech-hook.mjs`) also speaks each final reply. If it is wired and **Read new replies aloud** is on, both speak. Use one of them for automatic reads.
-
 ## Limits
 
 - Claude Code has no hook for the desktop app's selection bar ("Start in a side chat", "Reply", "Dictate"). **Read aloud with CopySpeech** stays in the right-click menu.
