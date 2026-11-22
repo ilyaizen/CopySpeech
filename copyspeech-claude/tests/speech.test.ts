@@ -2,10 +2,10 @@ import { expect, test } from "claude-code/testing";
 
 import {
   align,
+  applyOverrides,
   captionWords,
-  blocks,
-  inlineSpans,
   pickParagraphs,
+  prepareLine,
   prepareSpeech,
   speakable,
   wordTokens
@@ -24,6 +24,16 @@ test("skip drops headings, items, rules, and table rows but keeps text under a h
   const md = "## Answer\nYes it works.\n\n- one\n1. two\n---\n| a | b |\nDone.";
   expect(prepareSpeech([{ row: "r", md }], true, null).speech).toBe("Yes it works.\n\nDone.");
   expect(prepareSpeech([{ row: "r", md: "- one\n- two" }], false, null).speech).toBe("one\ntwo");
+});
+
+test("prepareLine speaks one list item from its own range, with the reply's offsets", async () => {
+  const md = "Pick one:\n\n- first item here\n- second item here";
+  const phrase = "second item here";
+  const from = md.indexOf(phrase);
+  const spoken = prepareLine("r", md, from, from + phrase.length);
+  expect(spoken.speech).toBe(phrase);
+  expect(spoken.tokens.map((t) => md.slice(t.start, t.end))).toEqual(["second", "item", "here"]);
+  expect(spoken.tokens.every((t) => t.row === "r")).toBe(true);
 });
 
 const MD = "The **quick** fox. Run `npm test` then [read docs](https://x.y/z) now.";
@@ -111,44 +121,24 @@ test("captions align to the spoken words across a heading, a list, and an excerp
   const a = align(words, spoken.tokens, 0);
   expect(a.ok).toBe(true);
   words.forEach((w, i) => expect(spoken.tokens[a.map[i] ?? -1]?.norm).toBe(w.norm));
-  const finally_ = spoken.tokens.find((t) => t.norm === "finally");
-  expect(finally_).toBeDefined();
-  if (finally_ === undefined) return;
-  const para = blocks(LONG).find((b) => b.start <= finally_.start && finally_.start < b.end);
-  if (para === undefined) return;
-  expect(inlineSpans(LONG, para, [finally_.start, finally_.end])[0]).toEqual({
-    text: "Finally",
-    hit: true
-  });
 });
 
-test("blocks keep fences whole and split on blank lines", async () => {
-  const md =
-    "# Title\n\nSay **bold** and [link](https://a.b).\n\n```\nx\n\ny\n```\n\n~~~\np\n\nq\n~~~\n\n- item one";
-  const bs = blocks(md);
-  expect(bs.map((b) => md.slice(b.start, b.end))).toEqual([
-    "# Title",
-    "Say **bold** and [link](https://a.b).",
-    "```\nx\n\ny\n```",
-    "~~~\np\n\nq\n~~~",
-    "- item one"
-  ]);
-});
-
-test("inline spans carry the chip on the spoken word only", async () => {
-  const md = "# Title\n\nSay **bold** and [link](https://a.b).\n\n- item one";
-  const bs = blocks(md);
-  const para = bs[1];
-  if (para === undefined) return;
-  const at = md.indexOf("bold");
-  const spans = inlineSpans(md, para, [at, at + 4]);
-  expect(spans.map((s) => s.text).join("")).toBe("Say bold and link.");
-  expect(spans.find((s) => s.hit)).toEqual({ text: "bold", bold: true, hit: true });
-  const list = bs[2];
-  if (list === undefined) return;
-  expect(
-    inlineSpans(md, list, null)
-      .map((s) => s.text)
-      .join("")
-  ).toBe("• item one");
+test("a setting override holds until the plugin loads a value other than the one it replaced", () => {
+  const loaded = {
+    autoRead: false,
+    skipSections: true,
+    excerpt: true,
+    excerptMode: "both",
+    excerptTop: 2,
+    excerptBottom: 2,
+    captions: true
+  };
+  const overrides = { autoRead: { from: false, to: true } };
+  expect(applyOverrides(loaded, overrides).autoRead).toBe(true);
+  // Once the plugin loads another value, the override is retired and the loaded value wins.
+  const stale = { autoRead: { from: false, to: false } };
+  expect(applyOverrides({ ...loaded, autoRead: true }, stale).autoRead).toBe(true);
+  // A bare value from an older build never holds.
+  // SAFETY: the old state shape, written before overrides carried `from`.
+  expect(applyOverrides(loaded, { autoRead: true } as never).autoRead).toBe(false);
 });
