@@ -178,8 +178,22 @@ export function blockLines(md: string, block: Block): Line[] {
   return out;
 }
 
+// An HTML tag: never spoken (register.tsx UNSPOKEN), so never drawn.
+const TAG = /^<[^>\n]+>/;
+
+// Whether the emphasis mark `d` at `i` can open (or close) a span, as CommonMark's flanking rule:
+// an opener has a non-space after it, a closer a non-space before it. A `_` mark also needs a
+// non-word on its outer side, so snake_case stays text.
+function flanks(md: string, i: number, d: string, open: boolean): boolean {
+  const inner = (open ? md[i + d.length] : md[i - 1]) ?? "";
+  const outer = (open ? md[i - 1] : md[i + d.length]) ?? "";
+  if (inner === "" || /\s/.test(inner)) return false;
+  return !(d.startsWith("_") && /[\p{L}\p{N}]/u.test(outer));
+}
+
 // [from, to) of the markdown as styled spans; `mark` (offsets into the whole reply) gets `hit`.
-// ponytail: **bold**, *italic*, ~~strike~~, `code` and [links](url); no `_italic_`, escapes or images.
+// A backslash escape draws its mark as text, and an HTML tag draws nothing (`<br>` a space).
+// ponytail: **bold**, *italic*, ~~strike~~, `code` and [links](url); no images, no nested `***`.
 export function inlineSpans(
   md: string,
   from: number,
@@ -187,8 +201,9 @@ export function inlineSpans(
   mark: [number, number] | null
 ): Span[] {
   const chars: Span[] = [];
-  let bold = false;
-  let italic = false;
+  // The mark that opened the bold or italic span being drawn, or null.
+  let bold: string | null = null;
+  let italic: string | null = null;
   let mono = false;
   let strike = false;
   // The "]" that closes the link label being drawn.
@@ -201,31 +216,42 @@ export function inlineSpans(
       linkEnd = -1;
       continue;
     }
-    if (!mono && rest.startsWith("**")) {
-      bold = !bold;
-      i += 2;
+    // An escaped mark is drawn as text: the backslash goes, the mark stays at its own offset.
+    if (!mono && /^\\[!-/:-@[-`{-~]/.test(rest)) i += 1;
+    else if (!mono && TAG.test(rest)) {
+      const tag = TAG.exec(rest)?.[0] ?? "";
+      if (/^<br\s*\/?>$/i.test(tag)) chars.push({ text: " " });
+      i += tag.length;
       continue;
-    }
-    if (!mono && rest.startsWith("~~")) {
+    } else if (!mono && (rest.startsWith("**") || rest.startsWith("__"))) {
+      const d = rest.slice(0, 2);
+      if (bold === d ? flanks(md, i, d, false) : bold === null && flanks(md, i, d, true)) {
+        bold = bold === null ? d : null;
+        i += 2;
+        continue;
+      }
+    } else if (!mono && rest.startsWith("~~")) {
       strike = !strike;
       i += 2;
       continue;
-    }
-    if (rest.startsWith("`")) {
+    } else if (rest.startsWith("`")) {
       mono = !mono;
       i += 1;
       continue;
-    }
-    if (!mono && rest.startsWith("*")) {
-      italic = !italic;
-      i += 1;
-      continue;
-    }
-    const label = mono || linkEnd >= 0 ? null : /^\[([^\]\n]*)\]\([^)\n]*\)/.exec(rest);
-    if (label) {
-      linkEnd = i + 1 + (label[1]?.length ?? 0);
-      i += 1;
-      continue;
+    } else if (!mono && (rest.startsWith("*") || rest.startsWith("_"))) {
+      const d = rest.slice(0, 1);
+      if (italic === d ? flanks(md, i, d, false) : italic === null && flanks(md, i, d, true)) {
+        italic = italic === null ? d : null;
+        i += 1;
+        continue;
+      }
+    } else {
+      const label = mono || linkEnd >= 0 ? null : /^\[([^\]\n]*)\]\([^)\n]*\)/.exec(rest);
+      if (label) {
+        linkEnd = i + 1 + (label[1]?.length ?? 0);
+        i += 1;
+        continue;
+      }
     }
     const ch = md[i] ?? "";
     if (ch === "\n") {
@@ -236,8 +262,8 @@ export function inlineSpans(
       continue;
     }
     const span: Span = { text: ch };
-    if (bold) span.bold = true;
-    if (italic) span.italic = true;
+    if (bold !== null) span.bold = true;
+    if (italic !== null) span.italic = true;
     if (mono) span.mono = true;
     if (strike) span.strike = true;
     if (linkEnd >= 0) span.link = true;

@@ -33,14 +33,14 @@ test("a new Read aloud replaces the reply the pane shows", async ($, on) => {
   on("http.fetch", () => ({ value: { status: 200, ok: true, headers: {}, text: "{}" } }));
   const one = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-1",
     props: { text: "Old message here.", isFirstOfReply: true }
   });
   const two = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-2",
     props: { text: "New message here.", isFirstOfReply: true }
@@ -97,7 +97,7 @@ test("a bare inactive status ends a heard reading at once", async ($, on) => {
   }));
   const reply = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-1",
     props: { text: "Hello there.", isFirstOfReply: true }
@@ -144,7 +144,7 @@ test("a stall while synthesis catches up keeps the reading; a bare inactive stat
   }));
   const reply = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-1",
     props: { text: "Hello there.", isFirstOfReply: true }
@@ -195,7 +195,7 @@ test("the captions pane keeps the last reading after it stops", async ($, on) =>
   }));
   const reply = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-1",
     props: { text: "Hello there.", isFirstOfReply: true }
@@ -221,7 +221,7 @@ test("a paragraph's Read button speaks only that paragraph", async ($, on) => {
   });
   const reply = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-2",
     props: {
@@ -233,8 +233,11 @@ test("a paragraph's Read button speaks only that paragraph", async ($, on) => {
   await clock.advance(250);
   const pane = await $.ui.mount(PANE);
   expect(await pane.find({ type: "Svg" })).toBeDefined();
-  // A desktop Read button: the plain word Read, with no icon.
-  expect((await pane.find({ key: "read-reply-2-1" }))?.props.label).toBe("Read");
+  // A desktop Read button: the plain Unicode play mark as its label.
+  expect((await pane.find({ key: "read-reply-2-1" }))?.props).toMatchObject({
+    label: "▶︎",
+    plain: true
+  });
   await pane.press({ key: "read-reply-2-1" });
   await clock.advance(250);
   const last = bodies[bodies.length - 1] ?? "";
@@ -254,7 +257,7 @@ test("each list item has its own Read button and speaks alone", async ($, on) =>
   });
   const reply = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-4",
     props: {
@@ -292,7 +295,7 @@ test("a heading's Read button reads it even with Skip sections on; a code block 
   });
   const reply = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-3",
     props: {
@@ -310,4 +313,44 @@ test("a heading's Read button reads it even with Skip sections on; a code block 
   expect(bodies.at(-1)).toContain("A heading");
   await pane.unmount();
   await reply.unmount();
+});
+
+test("a desktop reply has a Read per paragraph and per list item that speaks only it", async ($, on) => {
+  const clock = mock.clock(on);
+  const bodies: string[] = [];
+  on("http.fetch", (_, e) => {
+    if (e.url.endsWith("/speak")) bodies.push(JSON.stringify(e.init?.body ?? ""));
+    return { value: { status: 200, ok: true, headers: {}, text: "{}" } };
+  });
+  const reply = await $.ui.mount({
+    plugin: "copyspeech",
+    surface: "desktop",
+    component: "AssistantMessage",
+    requestId: "reply-6",
+    props: {
+      text: "First paragraph here.\n\nSecond paragraph here.\n\n- an item\n- other item",
+      isFirstOfReply: true
+    }
+  });
+  // No whole-reply button on desktop: it sat on a one-line last block's own play mark.
+  expect(await reply.find({ key: "play-reply-6" })).toBeUndefined();
+  await reply.press({ key: "read-reply-6-1" });
+  await clock.advance(250);
+  const last = bodies[bodies.length - 1] ?? "";
+  expect(last).toContain("Second paragraph here");
+  expect(last).not.toContain("First paragraph");
+  await reply.press({ key: "read-reply-6-2-1" });
+  await clock.advance(250);
+  expect(bodies[bodies.length - 1] ?? "").toContain("other item");
+  expect(bodies[bodies.length - 1] ?? "").not.toContain("an item");
+  await reply.unmount();
+});
+
+test("the pane's Read is a plain play mark while nothing plays", async ($) => {
+  const pane = await $.ui.mount(PANE);
+  expect((await pane.find({ key: "pane-read" }))?.props).toMatchObject({
+    label: "▶︎",
+    plain: true
+  });
+  await pane.unmount();
 });

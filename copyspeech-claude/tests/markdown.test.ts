@@ -129,3 +129,19 @@ test("a fence opens and closes on lines that start with its own mark", async () 
   // An unclosed fence runs to the end.
   expect(words("before\n\n~~~py\nx = 1")).toEqual(["before"]);
 });
+
+test("a lone or escaped star stays text, _marks_ style only at word edges, and tags draw nothing", async () => {
+  const draw = (md: string) =>
+    inlineSpans(md, 0, md.length, null).map((s) => [s.text, s.bold, s.italic]);
+  expect(draw("2 * 3 = 6")).toEqual([["2 * 3 = 6", undefined, undefined]]);
+  expect(draw("a \\*b\\* c")).toEqual([["a *b* c", undefined, undefined]]);
+  expect(draw("_one_ and snake_case_name")).toEqual([
+    ["one", undefined, true],
+    [" and snake_case_name", undefined, undefined]
+  ]);
+  expect(draw("__bold__ x")).toEqual([
+    ["bold", true, undefined],
+    [" x", undefined, undefined]
+  ]);
+  expect(draw("a<br>b <span>c</span>")).toEqual([["a b c", undefined, undefined]]);
+});

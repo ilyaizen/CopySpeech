@@ -33,7 +33,7 @@ const PANE = {
   }
 } as const;
 
-test("desktop reply's play button is the plain word Read, with no icon", async ($) => {
+test("desktop reply has a play mark per block, no whole-reply button, and no Svg", async ($) => {
   const ui = await $.ui.mount({
     plugin: "copyspeech",
     surface: "desktop",
@@ -43,7 +43,11 @@ test("desktop reply's play button is the plain word Read, with no icon", async (
   });
 
   expect(await ui.find({ type: "Svg" })).toBeUndefined();
-  expect(await ui.find({ key: "play-reply-1", text: "Read" })).toBeDefined();
+  expect(await ui.find({ key: "play-reply-1" })).toBeUndefined();
+  expect((await ui.find({ key: "read-reply-1-0" }))?.props).toMatchObject({
+    label: "▶︎",
+    plain: true
+  });
   await ui.unmount();
 });
 
@@ -72,7 +76,7 @@ test("a playing reply shows Pause and Stop in the band; Pause posts /pause, Stop
   });
   const ui = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-1",
     props: REPLY
@@ -155,7 +159,7 @@ async function playHello($: Parameters<TestBody>[0], on: Parameters<TestBody>[1]
   const mount = (requestId: string) =>
     $.ui.mount({
       plugin: "copyspeech",
-      surface: "desktop",
+      surface: "terminal",
       component: "AssistantMessage",
       requestId,
       props: REPLY
@@ -219,7 +223,7 @@ test("a reply's blocks without the spoken word draw as the engine's Markdown; th
   await $.session.start({ cwd: ".", surface: "desktop", isInteractive: true });
   const reply = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-1",
     props: { text: "First paragraph here.\n\nHello there.", isFirstOfReply: true }
@@ -246,7 +250,7 @@ test("the pane's header row shows Read when idle, then Pause and Stop while a re
   });
   const ui = await $.ui.mount({
     plugin: "copyspeech",
-    surface: "desktop",
+    surface: "terminal",
     component: "AssistantMessage",
     requestId: "reply-1",
     props: REPLY

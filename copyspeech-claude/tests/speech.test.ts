@@ -142,3 +142,19 @@ test("a setting override holds until the plugin loads a value other than the one
   // SAFETY: the old state shape, written before overrides carried `from`.
   expect(applyOverrides(loaded, { autoRead: true } as never).autoRead).toBe(false);
 });
+
+test("skip drops a list item's wrapped lines and nested items, and keeps code with no item whole", async () => {
+  const md = "Intro.\n\n- item one\n  wraps here\n    - nested item\n\nOutro.";
+  expect(prepareSpeech([{ row: "r", md }], true, null).speech).toBe("Intro.\n\nOutro.");
+  const code = "Run:\n\n```\n- not an item\nstill code\n```\n\nDone.";
+  expect(prepareSpeech([{ row: "r", md: code }], true, null).speech).toBe("Run:\n\nDone.");
+});
+
+test("a one-word fragment gets the chip on the next token", async () => {
+  const spoken = prepareSpeech([{ row: "r", md: "Summary\n\nAll tests pass." }], false, null);
+  const a = align(captionWords(captionFor("Summary")), spoken.tokens, 0);
+  expect(a.ok).toBe(true);
+  expect(a.map).toEqual([0]);
+  // Far from the cursor, one word does not anchor: it may be a common word in an excerpt gap.
+  expect(align(captionWords(captionFor("pass")), spoken.tokens, 0).ok).toBe(false);
+});
