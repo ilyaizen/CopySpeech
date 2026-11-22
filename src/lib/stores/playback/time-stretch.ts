@@ -11,10 +11,92 @@
  * duration change in: the transposer shortens by `pitch`, the stretch stage
  * then lengthens by `pitch / speed`, leaving duration = native / speed.
  */
-import { SoundTouch } from "@soundtouchjs/core";
+import {
+  registerInterpolationStrategy,
+  SoundTouch,
+  type InterpolationStrategyRegistration
+} from "@soundtouchjs/core";
 
 /** SoundTouch sample buffers are hard-coded to interleaved stereo frames. */
 const SAMPLES_PER_FRAME = 2;
+
+type InterpolationKernel = NonNullable<InterpolationStrategyRegistration["kernel"]>;
+
+/**
+ * Lanczos (a = 4) resampling for the pitch transposer, with the weights
+ * precomputed per 1/2048 sample phase. SoundTouch's built-in Lanczos kernel
+ * calls `Math.sin` twice per tap for every output sample: on V8 a 32 s pitch
+ * shift took ~1.1 s on the main thread before the batch path could start
+ * playback. The table takes ~0.15 s and stays ~80 dB from the built-in output.
+ */
+export const LANCZOS_TABLE_STRATEGY = "copyspeech-lanczos-table";
+const LANCZOS_A = 4;
+const LANCZOS_TAPS = 2 * LANCZOS_A;
+const LANCZOS_PHASES = 2048;
+
+function sinc(x: number): number {
+  if (x === 0) return 1;
+  const angle = Math.PI * x;
+  return Math.sin(angle) / angle;
+}
+
+/** Normalized weights, row `p` for fractional offset `p / LANCZOS_PHASES`, same taps as the built-in. */
+const lanczosTable = (() => {
+  const table = new Float32Array((LANCZOS_PHASES + 1) * LANCZOS_TAPS);
+  for (let phase = 0; phase <= LANCZOS_PHASES; phase++) {
+    const row = phase * LANCZOS_TAPS;
+    let sum = 0;
+    for (let tap = 0; tap < LANCZOS_TAPS; tap++) {
+      const distance = phase / LANCZOS_PHASES - (tap - (LANCZOS_A - 1));
+      const weight =
+        Math.abs(distance) >= LANCZOS_A ? 0 : sinc(distance) * sinc(distance / LANCZOS_A);
+      table[row + tap] = weight;
+      sum += weight;
+    }
+    for (let tap = 0; tap < LANCZOS_TAPS; tap++) table[row + tap] /= sum;
+  }
+  return table;
+})();
+
+/** The previous block's last frame. The transposer writes both fields before each block. */
+class KernelEdge {
+  prevSampleL = 0;
+  prevSampleR = 0;
+}
+
+const lanczosTableKernel: InterpolationKernel = (
+  src,
+  srcOffset,
+  numFrames,
+  position,
+  channel,
+  state
+) => {
+  const center = Math.floor(position);
+  const row = Math.round((position - center) * LANCZOS_PHASES) * LANCZOS_TAPS;
+  const first = center - (LANCZOS_A - 1);
+  let sum = 0;
+  if (first >= 0 && first + LANCZOS_TAPS <= numFrames) {
+    for (let tap = 0, at = srcOffset + 2 * first + channel; tap < LANCZOS_TAPS; tap++, at += 2) {
+      sum += src[at] * lanczosTable[row + tap];
+    }
+    return sum;
+  }
+  // Block edges, read like the built-in: before the block is the previous
+  // block's last frame, past the end repeats this block's last frame.
+  const edge = state instanceof KernelEdge ? state : null;
+  const before = channel === 0 ? (edge?.prevSampleL ?? 0) : (edge?.prevSampleR ?? 0);
+  for (let tap = 0; tap < LANCZOS_TAPS; tap++) {
+    const frame = first + tap;
+    const sample =
+      frame < 0 ? before : src[srcOffset + 2 * Math.min(frame, numFrames - 1) + channel];
+    sum += sample * lanczosTable[row + tap];
+  }
+  return sum;
+};
+lanczosTableKernel.createState = () => new KernelEdge();
+
+registerInterpolationStrategy({ id: LANCZOS_TABLE_STRATEGY, kernel: lanczosTableKernel });
 
 /** One channel of deinterleaved PCM, owning its buffer so it can back an AudioBuffer. */
 export type PcmChannel = Float32Array<ArrayBuffer>;
@@ -101,7 +183,11 @@ export class TimeStretcher {
     this._channelCount = Math.min(Math.max(channelCount, 1), 2);
     this._fadeFrames = Math.max(1, Math.round(sampleRate * 0.005));
     this._pending = new Float32Array(this._fadeFrames * SAMPLES_PER_FRAME);
-    this._processor = new SoundTouch({ sampleRate, sampleBufferType: "fifo" });
+    this._processor = new SoundTouch({
+      sampleRate,
+      sampleBufferType: "fifo",
+      interpolationStrategy: LANCZOS_TABLE_STRATEGY
+    });
     this.setRate(1, 1);
     this._fadeInRemaining = this._fadeFrames;
   }

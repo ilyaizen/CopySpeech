@@ -1,5 +1,21 @@
-import { describe, expect, it } from "vite-plus/test";
-import { concatTrim, TimeStretcher } from "../time-stretch";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { SoundTouch } from "@soundtouchjs/core";
+import { concatTrim, LANCZOS_TABLE_STRATEGY, TimeStretcher } from "../time-stretch";
+
+// The real SoundTouch, recording the options each instance was built with.
+const { soundTouchOptions } = vi.hoisted(() => ({
+  soundTouchOptions: new Array<ConstructorParameters<typeof SoundTouch>[0]>()
+}));
+vi.mock("@soundtouchjs/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@soundtouchjs/core")>();
+  class RecordingSoundTouch extends actual.SoundTouch {
+    constructor(options?: ConstructorParameters<typeof actual.SoundTouch>[0]) {
+      super(options);
+      soundTouchOptions.push(options);
+    }
+  }
+  return { ...actual, SoundTouch: RecordingSoundTouch };
+});
 
 const SAMPLE_RATE = 24000;
 
@@ -178,6 +194,64 @@ describe("TimeStretcher", () => {
       expect(nearSeams).toBeLessThanOrEqual(elsewhere);
     }
   );
+});
+
+describe("table-driven Lanczos transposer", () => {
+  /** Pitch-shift an interleaved stereo signal in blocks, so every block edge is exercised. */
+  function transpose(strategy: string, interleaved: Float32Array, blockFrames: number) {
+    const processor = new SoundTouch({
+      sampleRate: SAMPLE_RATE,
+      sampleBufferType: "fifo",
+      interpolationStrategy: strategy
+    });
+    processor.pitch = 0.85;
+    const parts: Float32Array[] = [];
+    for (let offset = 0; offset < interleaved.length; offset += blockFrames * 2) {
+      processor.inputBuffer.putSamples(interleaved.slice(offset, offset + blockFrames * 2));
+      processor.process();
+      const frames = processor.outputBuffer.frameCount;
+      const out = new Float32Array(frames * 2);
+      processor.outputBuffer.extract(out, 0, frames);
+      processor.outputBuffer.receive(frames);
+      parts.push(out);
+    }
+    const joined = new Float32Array(parts.reduce((sum, part) => sum + part.length, 0));
+    let at = 0;
+    for (const part of parts) {
+      joined.set(part, at);
+      at += part.length;
+    }
+    return joined;
+  }
+
+  it("matches SoundTouch's built-in Lanczos output", () => {
+    const left = sine(SAMPLE_RATE, 220);
+    const right = sine(SAMPLE_RATE, 330);
+    const interleaved = new Float32Array(left.length * 2);
+    for (let i = 0; i < left.length; i++) {
+      interleaved[2 * i] = left[i];
+      interleaved[2 * i + 1] = right[i];
+    }
+    const reference = transpose("lanczos", interleaved, 1777);
+    const table = transpose(LANCZOS_TABLE_STRATEGY, interleaved, 1777);
+
+    expect(table.length).toBe(reference.length);
+    let noise = 0;
+    let signal = 0;
+    for (let i = 0; i < reference.length; i++) {
+      noise += (table[i] - reference[i]) ** 2;
+      signal += reference[i] ** 2;
+    }
+    expect(10 * Math.log10(signal / noise)).toBeGreaterThan(70);
+  });
+
+  it("is the transposer every TimeStretcher uses", () => {
+    soundTouchOptions.length = 0;
+    new TimeStretcher(SAMPLE_RATE, 1);
+    expect(soundTouchOptions).toEqual([
+      expect.objectContaining({ interpolationStrategy: LANCZOS_TABLE_STRATEGY })
+    ]);
+  });
 });
 
 describe("concatTrim", () => {
