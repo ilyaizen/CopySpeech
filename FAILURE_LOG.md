@@ -4,6 +4,8 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 
 ## Playback
 
+- Track listener handles as registrations resolve; roll back failures and late successes, and clear only the failed setup attempt.
+- Catch playback listener setup rejections at the component mount boundary; log the failure without retrying or changing store rollback.
 - Keep main-shell listeners active through onboarding navigation; `goto('/')` does not remount the root layout.
 - Double-copy and browser readings run `speak_queued`. The Play page, hotkey, and control server run `speak_now`. Change both paths together.
 - Wire playback controls through `playbackStore` (webview audio). Rust `toggle_pause`/`skip_forward`/`skip_backward` drive only the Rodio safety-net player, which you never hear.

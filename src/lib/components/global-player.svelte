@@ -16,9 +16,11 @@
     });
   });
 
-  onMount(async () => {
+  onMount(() => {
     playbackStore.setAudioElement(audioEl);
-    await playbackStore.setupListeners();
+    void playbackStore.setupListeners().catch((error) => {
+      console.error("Failed to set up playback listeners:", error);
+    });
   });
 
   onDestroy(() => {

@@ -1472,14 +1472,29 @@ class PlaybackStore {
 
   async setupListeners(): Promise<void> {
     if (!isTauri) return;
-    this._listeners ??= this._registerListeners();
-    await this._listeners;
+    const pending = (this._listeners ??= this._registerListeners());
+    try {
+      await pending;
+    } catch (e) {
+      // A torn-down attempt must not clear its replacement's registration.
+      if (this._listeners === pending) this._listeners = null;
+      throw e;
+    }
   }
 
   private async _registerListeners(): Promise<Array<() => void>> {
     console.log("[PlaybackStore] Setting up listeners...");
+    const registered: Array<() => void> = [];
+    let failed = false;
     try {
-      const { listen, emit, emitTo } = await import("@tauri-apps/api/event");
+      const { listen: register, emit, emitTo } = await import("@tauri-apps/api/event");
+      const listen: typeof register = async (name, handler, options) => {
+        const unlisten = await register(name, handler, options);
+        // Concurrent caption registrations can finish after another one fails.
+        if (failed) unlisten();
+        else registered.push(unlisten);
+        return unlisten;
+      };
       this._emit = emit;
       this._emitTo = emitTo;
       // Legacy audio-ready carries only bytes. HUD metadata supplies its text;
@@ -1718,8 +1733,10 @@ class PlaybackStore {
         unAbort
       ];
     } catch (e) {
+      failed = true;
+      for (const unlisten of registered) unlisten();
       console.error("Failed to setup playback listeners:", e);
-      return [];
+      throw e;
     }
   }
 
@@ -1730,9 +1747,14 @@ class PlaybackStore {
     this._owner.release();
     const pending = this._listeners;
     this._listeners = null;
-    void pending?.then((fns) => {
-      for (const fn of fns) fn();
-    });
+    void pending?.then(
+      (fns) => {
+        for (const fn of fns) fn();
+      },
+      () => {
+        // Failed registration already rolled back its attempt-local listeners.
+      }
+    );
     if (this._cachedPitchUrl) {
       URL.revokeObjectURL(this._cachedPitchUrl.url);
       this._cachedPitchUrl = null;

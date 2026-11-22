@@ -97,6 +97,74 @@ describe("PlaybackControls", () => {
 });
 
 describe("GlobalPlayer", () => {
+  it("reports setup failure without retrying and still tears down", async () => {
+    const failure = new Error("Listener registration failed");
+    const setup = vi.spyOn(playbackStore, "setupListeners").mockRejectedValue(failure);
+    const teardown = vi.spyOn(playbackStore, "teardownListeners").mockImplementation(() => {});
+    const setAudio = vi.spyOn(playbackStore, "setAudioElement").mockImplementation(() => {});
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = render(GlobalPlayer);
+
+    await tick();
+
+    expect(setAudio).toHaveBeenCalledWith(view.container.querySelector("audio"));
+    expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+      "Failed to set up playback listeners:",
+      failure
+    );
+    expect(setup).toHaveBeenCalledTimes(1);
+    expect(teardown).not.toHaveBeenCalled();
+
+    view.unmount();
+    expect(teardown).toHaveBeenCalledTimes(1);
+    expect(setAudio).toHaveBeenLastCalledWith(null);
+  });
+
+  it("attaches audio before successful setup and clears it on teardown", async () => {
+    const setAudio = vi.spyOn(playbackStore, "setAudioElement").mockImplementation(() => {});
+    const setup = vi.spyOn(playbackStore, "setupListeners").mockImplementation(async () => {
+      expect(setAudio.mock.lastCall?.[0]).toBeInstanceOf(HTMLAudioElement);
+    });
+    const teardown = vi.spyOn(playbackStore, "teardownListeners").mockImplementation(() => {});
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = render(GlobalPlayer);
+
+    await tick();
+
+    expect(setup).toHaveBeenCalledTimes(1);
+    expect(diagnostic).not.toHaveBeenCalled();
+    expect(teardown).not.toHaveBeenCalled();
+    view.unmount();
+    expect(teardown).toHaveBeenCalledTimes(1);
+    expect(setAudio).toHaveBeenLastCalledWith(null);
+  });
+
+  it("handles setup rejection after teardown without reattaching audio or retrying", async () => {
+    let rejectSetup!: (error: Error) => void;
+    const pending = new Promise<void>((_resolve, reject) => {
+      rejectSetup = reject;
+    });
+    const setup = vi.spyOn(playbackStore, "setupListeners").mockReturnValue(pending);
+    const teardown = vi.spyOn(playbackStore, "teardownListeners").mockImplementation(() => {});
+    const setAudio = vi.spyOn(playbackStore, "setAudioElement").mockImplementation(() => {});
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = render(GlobalPlayer);
+    view.unmount();
+
+    const failure = new Error("Late listener registration failure");
+    rejectSetup(failure);
+    await tick();
+
+    expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+      "Failed to set up playback listeners:",
+      failure
+    );
+    expect(setup).toHaveBeenCalledTimes(1);
+    expect(teardown).toHaveBeenCalledTimes(1);
+    expect(setAudio).toHaveBeenCalledTimes(2);
+    expect(setAudio).toHaveBeenLastCalledWith(null);
+  });
+
   it("reports real webview playback, pause and stop to the tray", async () => {
     vi.spyOn(playbackStore, "setupListeners").mockResolvedValue();
     vi.spyOn(playbackStore, "teardownListeners").mockImplementation(() => {});

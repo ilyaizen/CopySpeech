@@ -27,7 +27,7 @@ vi.mock("@tauri-apps/api/event", () => ({
     listeners.set(name, callback);
     live.add(callback);
     return () => {
-      listeners.delete(name);
+      if (listeners.get(name) === callback) listeners.delete(name);
       live.delete(callback);
     };
   }),
@@ -138,6 +138,79 @@ it("keeps one set of listeners when HMR tears GlobalPlayer down mid-setup", asyn
   await Promise.all([first, second]);
 
   expect(live.size).toBe(perSetup);
+});
+
+it("rolls back a failed listener attempt and deduplicates its retry", async () => {
+  const perSetup = live.size;
+  playbackStore.teardownListeners();
+  await Promise.resolve();
+  const register = vi.mocked(listen).getMockImplementation()!;
+  const failure = new Error("listener registration failed");
+  const reached = Promise.withResolvers<void>();
+  vi.mocked(listen).mockImplementation(async (name, handler, options) => {
+    if (name === "playback-stop") {
+      reached.resolve();
+      throw failure;
+    }
+    return register(name, handler, options);
+  });
+  const first = playbackStore.setupListeners();
+  const concurrent = playbackStore.setupListeners();
+  const rejected = Promise.all([
+    expect(first).rejects.toBe(failure),
+    expect(concurrent).rejects.toBe(failure)
+  ]);
+  await reached.promise;
+  await rejected;
+  expect(live.size).toBe(0);
+  vi.mocked(listen).mockImplementation(register).mockClear();
+  await Promise.all([playbackStore.setupListeners(), playbackStore.setupListeners()]);
+  expect(listen).toHaveBeenCalledTimes(perSetup);
+  expect(live.size).toBe(perSetup);
+});
+
+it("cleans delayed captions after failure without clearing a replacement setup", async () => {
+  const perSetup = live.size;
+  playbackStore.teardownListeners();
+  await Promise.resolve();
+  const register = vi.mocked(listen).getMockImplementation()!;
+  const delayed = Promise.withResolvers<void>();
+  const reached = Promise.withResolvers<void>();
+  const fail = Promise.withResolvers<void>();
+  const failure = new Error("caption registration failed");
+  const cleaned = Promise.withResolvers<void>();
+  const lateCleanup = vi.fn(() => cleaned.resolve());
+  vi.mocked(listen).mockImplementation(async (name, handler, options) => {
+    if (name === "hud:playback_start") {
+      reached.resolve();
+      await fail.promise;
+      throw failure;
+    }
+    if (name === "hud:synthesizing") {
+      await delayed.promise;
+      const unlisten = await register(name, handler, options);
+      return () => {
+        lateCleanup();
+        unlisten();
+      };
+    }
+    return register(name, handler, options);
+  });
+  const first = playbackStore.setupListeners();
+  const rejected = expect(first).rejects.toBe(failure);
+  await reached.promise;
+  playbackStore.teardownListeners();
+  vi.mocked(listen).mockImplementation(register).mockClear();
+  await playbackStore.setupListeners();
+  fail.resolve();
+  await rejected;
+  expect(live.size).toBe(perSetup);
+  delayed.resolve();
+  await cleaned.promise;
+  expect(lateCleanup).toHaveBeenCalledTimes(1);
+  expect(live.size).toBe(perSetup);
+  await playbackStore.setupListeners();
+  expect(listen).toHaveBeenCalledTimes(perSetup);
 });
 
 it("does not restart a stopped reading when its pending decode finishes", async () => {
