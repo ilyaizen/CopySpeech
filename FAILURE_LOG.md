@@ -4,6 +4,7 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 
 ## Playback
 
+- Keep main-shell listeners active through onboarding navigation; `goto('/')` does not remount the root layout.
 - Double-copy and browser readings run `speak_queued`. The Play page, hotkey, and control server run `speak_now`. Change both paths together.
 - Wire playback controls through `playbackStore` (webview audio). Rust `toggle_pause`/`skip_forward`/`skip_backward` drive only the Rodio safety-net player, which you never hear.
 - `speak_now`'s return is neither playback start nor completion. Only the webview store's `finishPlayback`/`handleStop` → `playback-finished` → `playback_signal` chain means completion. Every terminal path must emit it, or blocking `/speak --wait` callers hang until the 600 s cap. Answer a non-wait `/speak` when `speak_requests::is_audible` reports its reading audible.
@@ -208,6 +209,7 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 - Log only command names in the shared Tauri wrapper; IPC arguments, results, and errors can contain credentials.
 
 - Import test APIs from `vite-plus/test`, not `vitest`.
+- Test layout startup through a static lifecycle import or mounted component; do not extract and evaluate Svelte source.
 - Hold a mocked async API on a promise the test opens when proving a race. `vi.waitFor` polls and hides the race.
 - Type test catalog maps with `satisfies Record<string, Catalog>`, not a `: Record<…>` annotation.
 - Let one dynamic `import()` of a `vi.mock`ed module settle before code under test starts another.

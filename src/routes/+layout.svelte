@@ -8,12 +8,12 @@
   import { page } from "$app/state";
   import { ModeWatcher, setMode, toggleMode } from "mode-watcher";
   import { Moon, Sun } from "@lucide/svelte";
-  import { invoke, isTauri } from "#lib/services/tauri";
+  import { invoke } from "#lib/services/tauri";
+  import { createLayoutStartup } from "./layout-startup";
   import AppHeader from "#lib/components/layout/app-header.svelte";
   import AppFooter from "#lib/components/layout/app-footer.svelte";
   import MotionWrapper from "#lib/components/layout/motion-wrapper.svelte";
   import { animationsStore } from "#lib/stores/animations-store.svelte";
-  import { startHistoryEventListeners, stopHistoryEventListeners } from "#lib/utils/history-events";
   import type { AppConfig } from "#lib/types";
   import "./+layout.css";
   import "#lib/components/landing/landing.css";
@@ -104,17 +104,19 @@
     }
   });
 
-  let unlistenSpeak: (() => void) | null = null;
-  let unlistenSettings: (() => void) | null = null;
-  // HMR can destroy this instance while onMount still awaits; a listener that
-  // resolves afterwards would outlive it and every double-copy would speak twice.
-  let destroyed = false;
+  const startup = createLayoutStartup({
+    isWeb,
+    isHudWindow,
+    isHud: () => isHud,
+    pathname: () => page.url.pathname,
+    goto,
+    syncConfig
+  });
 
   onMount(async () => {
     if (isWeb) return;
 
-    // Block the webview's native right-click menu (Reload, Save as, Print).
-    // Fields keep it for Cut, Copy, and Paste. Same idea as Handy.
+    // Block native menus outside fields. Fields keep Cut, Copy, and Paste.
     window.addEventListener("contextmenu", (e) => {
       const onField =
         e.target instanceof Element &&
@@ -122,38 +124,10 @@
       if (onField) return;
       e.preventDefault();
     });
+    await startup.mount();
+  });
 
-    console.log(
-      "[LAYOUT] onMount, isHudWindow:",
-      isHudWindow,
-      "isHud:",
-      isHud,
-      "pathname:",
-      page.url.pathname
-    );
-
-    // If we're in the Tauri "hud" window but not at the /hud route (dev mode),
-    // navigate to /hud immediately so SvelteKit renders the correct page.
-    if (isHudWindow && page.url.pathname !== "/hud") {
-      console.log("[LAYOUT] Navigating to /hud");
-      await goto("/hud", { replaceState: true });
-      return;
-    }
-
-    // HUD page — skip all main app shell initialization
-    if (isHud) {
-      console.log("[LAYOUT] HUD detected, skipping app shell");
-      return;
-    }
-
-    if (isTauri) {
-      const { listen } = await import("@tauri-apps/api/event");
-      unlistenSettings = await listen("open-settings", () => {
-        void goto("/settings");
-      });
-      if (destroyed) unlistenSettings();
-    }
-
+  async function syncConfig() {
     // Wait for i18n to be ready before syncing locale
     await waitForI18nReady();
 
@@ -171,7 +145,7 @@
         setMode("dark");
       }
 
-      // Gate route fades on the saved preference before the first paint.
+      // Sync route fades with the saved preference during shell startup.
       animationsStore.syncFromConfig(config);
 
       const { volume } = config.playback;
@@ -184,53 +158,7 @@
     } catch (e) {
       console.error("Failed to sync appearance/locale:", e);
     }
-
-    // First-run check
-    try {
-      const hasConfig = await invoke<boolean>("config_exists");
-      if (!hasConfig) {
-        goto("/onboarding");
-        return;
-      }
-    } catch (e) {
-      console.error("Failed to check config:", e);
-    }
-
-    // HMR may also have re-run history-events, so this instance's stop already ran.
-    if (destroyed) return;
-    await startHistoryEventListeners();
-
-    if (isTauri) {
-      try {
-        const { listen } = await import("@tauri-apps/api/event");
-        const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-
-        unlistenSpeak = await listen<{ text: string; trigger: unknown }>(
-          "speak-request",
-          async (e) => {
-            console.log("[LAYOUT] speak-request received, text length:", e.payload.text.length);
-            try {
-              // Use speak_queued so large texts are automatically paginated
-              // into fragments and played sequentially. `trigger` (double-copy
-              // context for the browser companion) goes back untouched.
-              await tauriInvoke("speak_queued", {
-                text: e.payload.text,
-                trigger: e.payload.trigger
-              });
-              console.log("[LAYOUT] speak_queued completed successfully");
-            } catch (err) {
-              console.error("[LAYOUT] speak_queued failed:", err);
-            }
-          }
-        );
-        if (destroyed) unlistenSpeak();
-        console.log("[LAYOUT] speak-request listener registered");
-      } catch (e) {
-        console.error("Failed to set up listeners:", e);
-      }
-    }
-  });
-
+  }
   async function handleSaveBarSave() {
     if (!saveBar.onSave) return;
     saveBar.isSaving = true;
@@ -243,14 +171,7 @@
     }
   }
 
-  // Cleanup event listeners when app unmounts
-  onDestroy(async () => {
-    destroyed = true;
-    if (isWeb) return;
-    await stopHistoryEventListeners();
-    if (unlistenSpeak) unlistenSpeak();
-    if (unlistenSettings) unlistenSettings();
-  });
+  onDestroy(startup.destroy);
 </script>
 
 <svelte:head>
