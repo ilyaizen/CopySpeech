@@ -28,6 +28,16 @@ Hover a reply and click the play button at its bottom right corner, over the end
 
 In the desktop app, select text inside a reply, right-click, and choose **Read aloud with CopySpeech**. CopySpeech reads only the selected words. The terminal has no right-click menu. Needs Claude Code 2.1.326 or later.
 
+## Reader pane
+
+Open it with `/copyspeech-settings`, or let a reading open it. Close it with its close button. Run the command again to reopen it. It shows only the latest reading.
+
+- **Read** – reads the last finished answer, or the replies the pane shows. While a reading plays, **Pause** (or **Resume**) and **Stop** replace it.
+- **Captions** – draws the reading's replies and marks the spoken word.
+- **Read one paragraph or list item** – hover it and press its **Read** button. It reads that part in full.
+- **Settings ▸** – expands the settings. A change applies at once.
+- **Excerpt controls** – Part, Top and Bottom show only while **Excerpt** is on. Top and Bottom use **-** and **+**, from 1 to 20.
+
 ## Settings
 
 Change the settings in one of four ways:
@@ -58,8 +68,8 @@ The key is the plugin's name as Claude Code loaded it: `copyspeech` or `copyspee
 - **Read new replies aloud** – off by default. Reads the finished turn's last text block, the answer. Narration between tool calls is not read.
 - **Skip bullet points and sections** – on by default. Automatic and play-button reads skip headings, bullet and numbered items, horizontal rules, and table rows. The text under a heading still reads. A reply made only of those lines reads nothing.
 - **Read only part of the reply** – on by default. Automatic and play-button reads keep the top and bottom paragraphs.
-- **Part to read** – both (default), top, or bottom.
-- **Top paragraphs** and **Bottom paragraphs** – 1 to 20, 2 by default. The captions pane shows them but cannot change them, since the desktop app's settings list omits these two number rows. Change them in `/config` or the settings file.
+- **Part to read** – both (default), top, or bottom. Shown only while **Read only part of the reply** is on.
+- **Top paragraphs** and **Bottom paragraphs** – 1 to 20, 2 by default. Each has **-** and **+** buttons in the captions pane's settings, shown only while **Read only part of the reply** is on. A press at 1 or 20 changes nothing. The desktop app's settings list omits these two number rows, so the pane writes them without a listed row. If the engine refuses a write, a toast gives the reason; `/config` or the settings file still sets them.
 - **Show captions** – on by default. Opens the captions pane by itself when a reading starts. An open pane still marks the spoken word.
 
 Selection reads always read in full.

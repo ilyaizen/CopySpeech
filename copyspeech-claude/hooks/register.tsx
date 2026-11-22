@@ -554,7 +554,8 @@ async function pollOnce($: EngineInterface) {
     // So a bare report ends a heard reading at once, and silence past SILENT_STOP_MS ends any.
     const silentFor = now - (run.lastActive > 0 ? run.lastActive : run.startedAt);
     const bare = s.position_ms === undefined;
-    if ((bare && run.lastActive > 0) || silentFor > SILENT_STOP_MS) await endIfCurrent($, current.id);
+    if ((bare && run.lastActive > 0) || silentFor > SILENT_STOP_MS)
+      await endIfCurrent($, current.id);
     return;
   }
   run.lastActive = now;
@@ -824,6 +825,19 @@ export const register: Register = (on, options) => {
     const nextMode =
       EXCERPT_MODES[(EXCERPT_MODES.indexOf(shown.excerptMode) + 1) % EXCERPT_MODES.length] ??
       "both";
+    // One paragraph count up or down, clamped to 1..20 by clampCount. A press at a limit writes nothing.
+    const step = (field: "excerptTop" | "excerptBottom", delta: number) => () => {
+      const to = clampCount(shown[field] + delta);
+      if (to !== shown[field]) save(field, to)();
+    };
+    const count = (field: "excerptTop" | "excerptBottom", label: string) => (
+      <Box flexDirection="row" alignItems="center" gap="xs">
+        <Text dimColor>{label}</Text>
+        <Button key={`${field}-down`} label="-" onPress={step(field, -1)} />
+        <Text>{String(shown[field])}</Text>
+        <Button key={`${field}-up`} label="+" onPress={step(field, 1)} />
+      </Box>
+    );
     // Hidden until the person opens Settings from the header row.
     const settingsBody = (
       <Box flexDirection="column" gap={1}>
@@ -833,17 +847,21 @@ export const register: Register = (on, options) => {
             {toggle("autoRead", "Auto-read")}
             {toggle("skipSections", "Skip sections")}
             {toggle("excerpt", "Excerpt")}
-            <Button
-              key="excerptMode"
-              label={`Part: ${shown.excerptMode}`}
-              onPress={save("excerptMode", nextMode)}
-            />
+            {shown.excerpt ? (
+              <Button
+                key="excerptMode"
+                label={`Part: ${shown.excerptMode}`}
+                onPress={save("excerptMode", nextMode)}
+              />
+            ) : null}
           </Box>
-          {/* On the desktop app the engine's config list does not return these two number rows,
-              so the pane cannot write them. It shows them and says where to change them. */}
-          <Text dimColor>
-            {`Top ${shown.excerptTop} · Bottom ${shown.excerptBottom}. Change in /config or settings.json.`}
-          </Text>
+          {/* Excerpt off: the part and the counts do nothing, so they are hidden. */}
+          {shown.excerpt ? (
+            <Box flexDirection="column" gap="xs">
+              {count("excerptTop", "Top paragraphs")}
+              {count("excerptBottom", "Bottom paragraphs")}
+            </Box>
+          ) : null}
         </Box>
         <Box flexDirection="column" gap="xs">
           <Text dimColor>Captions</Text>
