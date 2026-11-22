@@ -83,6 +83,7 @@ test(
   async ($, on) => {
     const opened: string[] = [];
     on("prompt.submit", (_, e) => ({ text: e.text }));
+    on("http.fetch", () => ({ value: { status: 200, ok: true, headers: {}, text: "{}" } }));
     on("ui.open", (_, e) => {
       opened.push(e.id);
       return { value: { isPlaced: true } };

@@ -11,6 +11,7 @@ import type { Block, Line } from "./markdown";
 // menu row. The engine draws each reply's own Markdown untouched.
 const CONTROL = "http://127.0.0.1:43117";
 const POLL_MS = 120;
+const HEALTH_MS = 5000;
 // The plugin's name in its manifest; its `/config` keys start with it.
 const PLUGIN_NAME = "copyspeech";
 // No playback this long ends a reading, whatever the status reports.
@@ -488,10 +489,25 @@ async function startNow($: EngineInterface, ids: string[], text: Spoken) {
   mine.startedAt = await $.clock.now();
 }
 
-// Opens the captions pane while captions are on. Called from a press it is asked, so
-// the terminal places it at any width; from auto-read it waits for 144 columns.
-async function openPane($: EngineInterface, captions: boolean) {
-  if (captions) await $.ui.open({ id: PANE, title: "CopySpeech Reader" }).catch(() => undefined);
+// True while CopySpeech's control server answers /health.
+function isUp($: EngineInterface): Promise<boolean> {
+  return $.http
+    .fetch(CONTROL + "/health")
+    .then((r) => r.ok)
+    .catch(() => false);
+}
+
+// Opens the captions pane while captions are on and CopySpeech runs; with CopySpeech down
+// it closes the pane instead. Called from a press it is asked, so the terminal places it
+// at any width; from auto-read it waits for 144 columns.
+async function openPane($: EngineInterface, captions: boolean): Promise<boolean> {
+  if (!captions) return false;
+  if (!(await isUp($))) {
+    await $.ui.close({ id: PANE }).catch(() => undefined);
+    return false;
+  }
+  await $.ui.open({ id: PANE, title: "CopySpeech Reader" }).catch(() => undefined);
+  return true;
 }
 
 // A /stop with no request_id is CopySpeech's global stop, as the tray's Stop
@@ -669,13 +685,16 @@ export const register: Register = (on, options) => {
       name: "copyspeech-settings",
       description: "Open the CopySpeech Reader pane with its settings"
     });
-    const health = await $.http
-      .fetch(CONTROL + "/health")
-      .then((r) => (r.ok ? null : `HTTP ${r.status}`))
-      .catch(String);
-    if (health !== null) $.ui.toast(`CopySpeech /health failed: ${health}`);
+    // A CopySpeech that is down shows no pane: close one a past session left open.
+    if (!(await isUp($))) await $.ui.close({ id: PANE }).catch(() => undefined);
     // ponytail: one global 120 ms timer that idles without a reading; start/stop it per reading if it ever shows in profiles.
     $.clock.every(POLL_MS, () => void poll($).catch(() => undefined));
+    // The pane leaves when CopySpeech quits. It does not return by itself: a reading or the settings command opens it.
+    $.clock.every(
+      HEALTH_MS,
+      () =>
+        void isUp($).then((up) => (up ? undefined : $.ui.close({ id: PANE }).catch(() => undefined)))
+    );
     return next(e);
   });
 
@@ -689,7 +708,7 @@ export const register: Register = (on, options) => {
   }));
 
   on("command.run", { command: "copyspeech-settings" }, async ($) => {
-    await $.ui.open({ id: PANE, title: "CopySpeech Reader" }).catch(() => undefined);
+    if (!(await openPane($, true))) return { text: "CopySpeech is not running." };
     return { text: "CopySpeech settings are in the Reader pane." };
   });
 

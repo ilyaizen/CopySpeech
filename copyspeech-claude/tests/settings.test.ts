@@ -77,6 +77,7 @@ test(
 
 test("/copyspeech-settings opens the captions pane", async ($, on) => {
   const opened: string[] = [];
+  on("http.fetch", () => ({ value: { status: 200, ok: true, headers: {}, text: "{}" } }));
   on("ui.open", (_, e) => {
     opened.push(e.id);
     return { value: { isPlaced: true } };
@@ -84,6 +85,19 @@ test("/copyspeech-settings opens the captions pane", async ($, on) => {
   const result = await $.command.run(RUN);
   expect(opened).toEqual(["captions"]);
   expect(result.text).toBe("CopySpeech settings are in the Reader pane.");
+});
+
+test("/copyspeech-settings opens no pane while CopySpeech is down", async ($, on) => {
+  const opened: string[] = [];
+  on("http.fetch", () => ({ value: { status: 503, ok: false, headers: {}, text: "" } }));
+  on("ui.close", () => ({ value: undefined }));
+  on("ui.open", (_, e) => {
+    opened.push(e.id);
+    return { value: { isPlaced: true } };
+  });
+  const result = await $.command.run(RUN);
+  expect(opened).toEqual([]);
+  expect(result.text).toBe("CopySpeech is not running.");
 });
 
 test(
