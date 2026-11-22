@@ -48,7 +48,7 @@ The double-copy trigger. Copy any text twice within 1.5 s and it speaks — no h
 
 - README feature checklist and platform table (repo root).
 - App screenshot: `static/screen-0.3.1-light.png` and `static/screen-0.3.1-dark.png`.
-- Incumbent visual spec: `DESIGN.md` (muted-slate brutalist; `src/routes/+layout.css` is the token source of truth).
+- Incumbent visual spec: `docs_internal/DESIGN.md` (muted-slate brutalist; `src/routes/+layout.css` is the token source of truth).
 - Absence: no testimonials, press, pricing, or user studies. Future work must not fabricate them.
 
 ## Product Principles

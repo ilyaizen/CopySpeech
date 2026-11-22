@@ -146,4 +146,4 @@ For the boundary between profile and global HTTP settings, see
 4. Local engines: add `install-*.ps1` / `install-*.sh` under `scripts/`.
 
 Known gotchas (test fixtures, installer bundling, wrapper backports) are in the
-Engines section of [`agents/failure-log.md`](./agents/failure-log.md#engines).
+Engines section of [`FAILURE_LOG.md`](../FAILURE_LOG.md#engines).

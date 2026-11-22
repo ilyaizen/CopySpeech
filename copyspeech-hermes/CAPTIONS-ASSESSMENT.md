@@ -10,7 +10,7 @@ Verdict: GO, narrow scope. Paint runs on source-read DOM hooks only. No live DOM
    - Body comes from `current_caption()` (`src-tauri/src/playback_signal.rs:116-119`). It serves the last report while younger than 1 s.
    - Shape (from `src/lib/stores/playback-store.svelte.ts:576` and `src/lib/types/hud.ts:55-65`): `active`, `paused`, `text`, `captions:{text, words:[{text_start,text_end,start_ms,end_ms}]}`, `position_ms`, `duration_ms`, `fragment_index`.
    - Inactive report at `playback-store.svelte.ts:518`. Reports throttle to ~100 ms (`:571-578`).
-   - The failure log says `/status` is the only CORS-open route (`docs/agents/failure-log.md:44-63`). Code agrees.
+   - The failure log says `/status` is the only CORS-open route (`FAILURE_LOG.md` (Captions)). Code agrees.
 
 2. **Correlation with our request: NO.**
    - `/status` carries no `request_id`. The plugin cannot tell whether the live reading is its own.
@@ -27,7 +27,7 @@ Verdict: GO, narrow scope. Paint runs on source-read DOM hooks only. No live DOM
 
 4. **CSS Custom Highlight API: available by version.**
    - Electron `44.10.2` (`apps/desktop/package.json:195`). Chromium supports `CSS.highlights` and `Highlight` well before that. Known from Chromium history, not probed in this runtime.
-   - Pitfalls from `docs/agents/failure-log.md:242-253`: never shadow `CSS`; hold on index -1; group per-character entries; resync across the excerpt gap.
+   - Pitfalls from `FAILURE_LOG.md` (Captions): never shadow `CSS`; hold on index -1; group per-character entries; resync across the excerpt gap.
 
 5. **Reference port size (`copyspeech-dsh/client.js`, read only):**
    - Poll loop: `:1503-1557`. Status read: `:1589-1600`. Caption parse: `:1606-1624`.

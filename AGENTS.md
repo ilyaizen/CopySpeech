@@ -38,7 +38,7 @@ CopySpeech: A lightweight and modern cross-platform AI text-to-speech orchestrat
 - Leave visual verification to the user; skip image previews.
 - Commits: [Conventional Commits](https://www.conventionalcommits.org/). Branches: squash-merge into `main`, then delete the branch (local and origin) in the same pass.
 
-Internal docs (untracked): start at `docs_internal/README.md`.
+Internal docs (untracked): start at `docs_internal/README.md`. Product vocabulary: `docs_internal/GLOSSARY.md`. Product idea: `docs_internal/IDEA.md`. Visual spec: `docs_internal/DESIGN.md`. File tree: `docs_internal/file-structure.txt` (regenerate with `bun run tree`).
 
 ## Test placement
 
@@ -80,11 +80,11 @@ Default five: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`
 
 ### Domain docs
 
-Single-context: root `GLOSSARY.md` + `docs/adr/`, created lazily. See `docs_internal/agents/domain.md`.
+Single-context: `docs_internal/GLOSSARY.md` + `docs/adr/`, created lazily. See `docs_internal/agents/domain.md`.
 
 ## Failure log
 
-Every line exists because it went wrong at least once. On mistake, correction, or undocumented discovery about the codebase, add one imperative line describing correct behaviour: here if every session needs it, else under its area in [`docs/agents/failure-log.md`](docs/agents/failure-log.md). A workflow fix goes in a skill under `.agents/skills/` instead. Include it in the same commit and mention it in the summary. Periodically shorten this section to save tokens.
+Every line exists because it went wrong at least once. On mistake, correction, or undocumented discovery about the codebase, add one imperative line describing correct behaviour: here if every session needs it, else under its area in [`FAILURE_LOG.md`](FAILURE_LOG.md). A workflow fix goes in a skill under `.agents/skills/` instead. Include it in the same commit and mention it in the summary. Periodically shorten this section to save tokens.
 
 - In a fresh worktree, run `bun install` in `browser-extension/` as well as the root; without its `@types/chrome`, `vp check` fails with `Cannot find type definition file for 'chrome'`.
 - Use three-way `cfg(target_os = ...)` (windows/macos/linux) for platform seams; `cfg(not(windows))` makes macOS compile Linux-only code (wl-clipboard, gtk-layer-shell) that cannot build or run on darwin.
@@ -95,7 +95,7 @@ Every line exists because it went wrong at least once. On mistake, correction, o
 
 ### Area gotchas
 
-Before editing an area, read its section in [`docs/agents/failure-log.md`](docs/agents/failure-log.md):
+Before editing an area, read its section in [`FAILURE_LOG.md`](FAILURE_LOG.md):
 
 - **Settings**: stacked sections, scroll-spy, row tooltips, Experimental-gated sections
 - **Playback**: webview audio, `pcm-stream.ts`, `TimeStretcher`, effects, streaming, HUD events, ducking
