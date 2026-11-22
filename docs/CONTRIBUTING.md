@@ -19,6 +19,7 @@ Before you begin, ensure you have the following installed:
 
 - [Rust](https://rustup.rs/) (latest stable)
 - [Bun](https://bun.sh/) package manager
+- [uv](https://docs.astral.sh/uv/) (only to install or run local engines and Edge-TTS; see [engines.md](engines.md))
 
 ### Setting Up Your Development Environment
 
@@ -27,7 +28,7 @@ Before you begin, ensure you have the following installed:
 2. **Clone your fork**:
 
    ```bash
-   git clone https://github.com/ilyaizen/CopySpeech.git
+   git clone https://github.com/<your-username>/CopySpeech.git
    cd CopySpeech
    ```
 
@@ -59,7 +60,7 @@ CopySpeech follows a clean architecture pattern:
 - `commands/` - Tauri command handlers for frontend communication
 - `clipboard/` - Double-copy detection trigger
 - `audio/` - Rodio safety-net player (audible playback runs in the webview, `src/lib/stores/playback/`)
-- `tts/` - TTS backend abstraction (cloud: ElevenLabs, OpenAI, Cartesia, Microsoft, Google · local: Kale (default on Windows), tiny-voca, Kokoro, Piper, Kitten, Qwen, Pocket · generic: HTTP)
+- `tts/` - TTS backend abstraction (cloud: Edge-TTS, OpenAI, ElevenLabs, Cartesia, Fish Audio, xAI, Mistral, Google, Microsoft · local: Kale (default on Windows), tiny-voca, Kokoro, Piper, Kitten, Qwen, Pocket · generic: CLI, HTTP)
 - `sanitize/` - Text normalization modules
 - `history.rs` - Speech history and saved-audio cache
 - `control_server.rs` - Loopback HTTP API used by the CLI and agent integrations
@@ -162,7 +163,7 @@ Community feedback is essential to keeping CopySpeech the best it can be for eve
 4. **Commit your changes**:
 
    ```bash
-   git add .
+   git add -- <changed paths>
    git commit -m "feat: add your feature description"
    # or
    git commit -m "fix: describe the bug fix"
@@ -193,7 +194,7 @@ Community feedback is essential to keeping CopySpeech the best it can be for eve
    - Go to the [CopySpeech repository](https://github.com/ilyaizen/CopySpeech)
    - Click "New Pull Request"
    - Select your fork and branch
-   - Fill out the PR template completely, including:
+   - In the PR description, include:
      - Clear description of changes
      - Links to related issues or discussions
      - **Community feedback** (especially important for features)
@@ -217,7 +218,7 @@ In your PR description, please include:
 
 **Rust:**
 
-- Follow standard Rust formatting (`cargo fmt`)
+- Format the Rust files you changed with `rustfmt --edition 2021 <files>` (`cargo fmt --all` rewrites unrelated files)
 - Run `cargo clippy` and address warnings
 - Use descriptive variable and function names
 - Add doc comments for public APIs

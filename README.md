@@ -25,7 +25,7 @@ CopySpeech reads your clipboard aloud. Copy the same text twice within 1.5 secon
 - **Double-copy trigger.** No hotkey needed. The tray and the Play page also start playback.
 - **16 built-in engines.** Run them locally or in the cloud. Add any CLI tool or HTTP endpoint. See [docs/engines.md](docs/engines.md).
   - Local: Kale (default on Windows, English text only), tiny-voca (English text only), Kokoro, Piper, Kitten, Qwen3-TTS, Pocket.
-  - Cloud: OpenAI, ElevenLabs, Cartesia, Fish Audio, xAI, Mistral, Google Gemini, Microsoft Azure.
+  - Cloud: Edge-TTS (no API key), OpenAI, ElevenLabs, Cartesia, Fish Audio, xAI, Mistral, Google Gemini, Microsoft Azure.
 - **One-click local installs.** Kokoro installs from onboarding, with optional CUDA.
 - **Live captions.** Words highlight as they play. Captions need an engine that reports timings.
 - **Streaming playback.** Local engines start speaking after the first audio window.
@@ -61,8 +61,8 @@ Installed Windows builds register the Chrome host at launch. Edge, Firefox, Linu
 
 ## Integrations
 
-- **Hermes Desktop and DeepSeek Harness (DSH) plugins.** Speak new assistant replies in those apps. See [copyspeech-dsh/README.md](copyspeech-dsh/README.md) for DSH.
-- **Pi extension and Claude Code hook.** Speak final assistant replies. See [docs/agent-voice.md](docs/agent-voice.md).
+- **Hermes Desktop and DeepSeek Harness (DSH) plugins.** Speak new assistant replies in those apps. See [copyspeech-hermes/README.md](copyspeech-hermes/README.md) for Hermes and [copyspeech-dsh/README.md](copyspeech-dsh/README.md) for DSH.
+- **Pi extension and Claude Code hook.** Speak final assistant replies.
 - **Claude Code plugin.** Play buttons and live captions in Claude Code. See [copyspeech-claude/README.md](copyspeech-claude/README.md).
 
 ## Development

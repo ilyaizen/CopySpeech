@@ -99,12 +99,8 @@
 │   │   ├── 0002-streaming-consolidation.md
 │   │   └── 0003-no-qwen-cloud-provider.md
 │   ├── agents
-│   │   ├── domain.md
-│   │   ├── failure-log.md
-│   │   ├── issue-tracker.md
-│   │   └── triage-labels.md
+│   │   └── failure-log.md
 │   ├── CONTRIBUTING.md
-│   ├── agent-voice.md
 │   ├── engines.md
 │   └── profile-engine-settings.md
 ├── scripts

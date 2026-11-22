@@ -13,8 +13,12 @@ pitch + effect as one swappable unit.
 
 | Engine             | Type   | API key        | Offline | Live captions   | Installer                       | Setup test               |
 | ------------------ | ------ | -------------- | ------- | --------------- | ------------------------------- | ------------------------ |
+| Edge-TTS           | cloud  | no             | no      | yes             | — (uv runs the pinned client)   | `test_tts_engine_config` |
 | Cartesia (Sonic)   | cloud  | yes            | no      | yes             | —                               | `test_tts_engine_config` |
 | ElevenLabs         | cloud  | yes            | no      | yes             | —                               | `test_tts_engine_config` |
+| Fish Audio         | cloud  | yes            | no      | yes (estimated) | —                               | `test_tts_engine_config` |
+| xAI                | cloud  | yes            | no      | yes             | —                               | `test_tts_engine_config` |
+| Mistral            | cloud  | yes            | no      | no              | —                               | `test_tts_engine_config` |
 | OpenAI             | cloud  | yes            | no      | no              | —                               | `test_tts_engine_config` |
 | Google Gemini TTS  | cloud  | yes            | no      | no              | —                               | `test_tts_engine_config` |
 | Microsoft / Azure  | cloud  | yes + endpoint | no      | no              | —                               | `test_tts_engine_config` |
@@ -33,16 +37,18 @@ Each cloud tab on the Engine page takes an API key (Microsoft also takes an
 endpoint). Click **Test Setup** to synthesize a short clip with the engine's
 default voice and confirm the credential works.
 
-> Edge-TTS was removed from the app in 2026-10: Microsoft killed the free
-> Read-Aloud protocol the `edge-tts` CLI speaks
-> ([rany2/edge-tts#490](https://github.com/rany2/edge-tts/issues/490)). It comes
-> back when upstream ships a fixed release.
+Edge-TTS needs no key. It uses Microsoft's free Read Aloud voices through the
+pinned `edge-tts` 7.3.1 client, which CopySpeech runs with
+`uv run --with edge-tts==7.3.1`. It needs `uv` on `PATH`, but no install step.
 
 | Engine            | Where to get credentials                      |
 | ----------------- | --------------------------------------------- |
 | OpenAI            | <https://platform.openai.com/api-keys>        |
 | ElevenLabs        | <https://elevenlabs.io/app/settings/api-keys> |
+| Fish Audio        | <https://fish.audio/app/api-keys>             |
 | Cartesia          | <https://cartesia.ai/console>                 |
+| xAI               | <https://console.x.ai>                        |
+| Mistral           | <https://console.mistral.ai/api-keys>         |
 | Google Gemini TTS | <https://aistudio.google.com/app/apikey>      |
 | Microsoft / Azure | Azure AI Foundry deployment key + endpoint    |
 
@@ -68,28 +74,24 @@ Engines install into `%LOCALAPPDATA%\CopySpeech\engines\<engine>`. Each installe
 Common flags: `-Force` (reinstall), `-SmokeTest` (synthesize one clip),
 `-Cuda` (GPU acceleration, see below).
 
-| Engine     | Installer               | Size        | Notes                                                                                                                                                                                          |
-| ---------- | ----------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Kitten TTS | `install-kittentts.ps1` | 25-80MB     | 8 voices, CPU ONNX. Model downloads on first use.                                                                                                                                              |
-| Piper      | `install-piper.ps1`     | ~60MB/voice | Drop `.onnx` + `.onnx.json` into `engines/piper/voices/`.                                                                                                                                      |
-| Kokoro TTS | `install-kokoro.ps1`    | ~335MB      | Natural voices, broad accent coverage. Shared model.                                                                                                                                           |
-| Pocket TTS | `install-pocket.ps1`    | 100M params | Kyutai Pocket; 14 voices in 6 languages. CPU-first.                                                                                                                                            |
-| tiny-voca  | `install-tiny-voca.ps1` | ~45MB       | English text only; 2 voices (F2, M2); CPU-only ONNX. Captions are estimated.                                                                                                                   |
-| Kale TTS   | `install-kale.ps1`      | ~29MB       | English text only; 10 voices (US + British); 7.5M params, CPU-only int8 ONNX. Captions are estimated. Voices are synthetic designs (Maya-1 policy): never present output as a human recording. |
-| Qwen3-TTS  | `install-qwen.ps1`      | —           | Multilingual; 9 built-in voices; model downloads on first use.                                                                                                                                 |
+| Engine     | Installer               | Size            | Notes                                                                                                                                                                                          |
+| ---------- | ----------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Kitten TTS | `install-kittentts.ps1` | 25-80MB         | 8 voices, CPU ONNX. Model downloads on first use.                                                                                                                                              |
+| Piper      | `install-piper.ps1`     | ~20–100MB/voice | Drop `.onnx` + `.onnx.json` into `engines/piper/voices/`.                                                                                                                                      |
+| Kokoro TTS | `install-kokoro.ps1`    | ~335MB          | Natural voices, broad accent coverage. Shared model.                                                                                                                                           |
+| Pocket TTS | `install-pocket.ps1`    | 100M params     | Kyutai Pocket; 14 voices in 6 languages. CPU-first.                                                                                                                                            |
+| tiny-voca  | `install-tiny-voca.ps1` | ~45MB           | English text only; 2 voices (F2, M2); CPU-only ONNX. Captions are estimated.                                                                                                                   |
+| Kale TTS   | `install-kale.ps1`      | ~29MB           | English text only; 10 voices (US + British); 7.5M params, CPU-only int8 ONNX. Captions are estimated. Voices are synthetic designs (Maya-1 policy): never present output as a human recording. |
+| Qwen3-TTS  | `install-qwen.ps1`      | ~1.2GB          | Multilingual; 9 built-in voices; the selected model downloads on first use.                                                                                                                    |
 
-(Edge-TTS is uv-managed too but has no installer script — install its CLI
-with `uv tool install edge-tts`.)
-
-> Edge-TTS is currently removed from the app (upstream service dead, 2026-10);
-> the note above applies only if/when it returns.
+Edge-TTS has no installer script: CopySpeech runs its pinned client through
+`uv` on demand (see [Cloud engines](#cloud-engines)).
 
 Manual run (if you prefer the terminal):
 
 ```powershell
-./scripts/install-uv.ps1            # one-time uv bootstrap
-uv tool install edge-tts            # edge-tts CLI (no app installer)
-./scripts/test-engine.ps1 -Engine pocket       # verify any installed engine
+./scripts/install-uv.ps1                   # one-time uv bootstrap
+./scripts/test-engine.ps1 -Engine pocket   # verify any installed engine
 ```
 
 ### Resident models
@@ -129,9 +131,10 @@ fast laptop chip the GPU is no quicker. It pays off on thread-limited machines.
 
 Any TTS engine that exposes an HTTP API (OpenAI-compatible or custom) is
 configured **per profile**: URL template, method, headers, body template,
-voice, response format, timeout. See
-[`profile-engine-settings.md`](./profile-engine-settings.md#http-and-cli-semantics)
-for the placeholder tokens (`{text}`, `{raw_text}`, `{voice}`, `{speed}`).
+voice, response format, timeout. The URL and body templates accept three
+placeholders: `{text}`, `{raw_text}`, and `{voice}` (`src-tauri/src/tts/http.rs`).
+For the boundary between profile and global HTTP settings, see
+[`profile-engine-settings.md`](./profile-engine-settings.md#engine-matrix).
 
 ## Adding a new engine
 
