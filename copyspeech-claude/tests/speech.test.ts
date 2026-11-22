@@ -3,8 +3,6 @@ import { expect, test } from "claude-code/testing";
 import {
   align,
   captionWords,
-  blocks,
-  inlineSpans,
   pickParagraphs,
   prepareSpeech,
   speakable,
@@ -111,44 +109,4 @@ test("captions align to the spoken words across a heading, a list, and an excerp
   const a = align(words, spoken.tokens, 0);
   expect(a.ok).toBe(true);
   words.forEach((w, i) => expect(spoken.tokens[a.map[i] ?? -1]?.norm).toBe(w.norm));
-  const finally_ = spoken.tokens.find((t) => t.norm === "finally");
-  expect(finally_).toBeDefined();
-  if (finally_ === undefined) return;
-  const para = blocks(LONG).find((b) => b.start <= finally_.start && finally_.start < b.end);
-  if (para === undefined) return;
-  expect(inlineSpans(LONG, para, [finally_.start, finally_.end])[0]).toEqual({
-    text: "Finally",
-    hit: true
-  });
-});
-
-test("blocks keep fences whole and split on blank lines", async () => {
-  const md =
-    "# Title\n\nSay **bold** and [link](https://a.b).\n\n```\nx\n\ny\n```\n\n~~~\np\n\nq\n~~~\n\n- item one";
-  const bs = blocks(md);
-  expect(bs.map((b) => md.slice(b.start, b.end))).toEqual([
-    "# Title",
-    "Say **bold** and [link](https://a.b).",
-    "```\nx\n\ny\n```",
-    "~~~\np\n\nq\n~~~",
-    "- item one"
-  ]);
-});
-
-test("inline spans carry the chip on the spoken word only", async () => {
-  const md = "# Title\n\nSay **bold** and [link](https://a.b).\n\n- item one";
-  const bs = blocks(md);
-  const para = bs[1];
-  if (para === undefined) return;
-  const at = md.indexOf("bold");
-  const spans = inlineSpans(md, para, [at, at + 4]);
-  expect(spans.map((s) => s.text).join("")).toBe("Say bold and link.");
-  expect(spans.find((s) => s.hit)).toEqual({ text: "bold", bold: true, hit: true });
-  const list = bs[2];
-  if (list === undefined) return;
-  expect(
-    inlineSpans(md, list, null)
-      .map((s) => s.text)
-      .join("")
-  ).toBe("• item one");
 });

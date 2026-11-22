@@ -68,11 +68,11 @@ Selection reads always read in full.
 
 - Reads CopySpeech's `GET /status` every 120 ms while a reading plays.
 - Matches the caption words to the spoken text, which leaves out skipped lines and an excerpt gap: half the words of a caption fragment must match. Across an excerpt gap, it needs a run of 3 words to jump.
-- Opens a **CopySpeech companion** pane when a reading starts, or with `/copyspeech-settings`. The pane stays open after a reading. It shows only the latest reading: a new **Read aloud** replaces it. Hover a paragraph to show a small **▶** at its side: it reads only that paragraph.
+- Opens a **CopySpeech companion** pane when a reading starts, or with `/copyspeech-settings`. The pane stays open after a reading. It shows only the latest reading: a new **Read aloud** replaces it. Hover a paragraph to show a **Read** button at its side, with the CopySpeech mark: it reads only that paragraph.
 - The settings sit at the bottom of the pane, behind **Settings ▸**. Expand them to change a setting. They show only while nothing is read.
-- Shows the reading's replies in the pane with Markdown marks removed and bold, italic and code styled, with a chip on the spoken word in reverse video: the text color behind it, with the background color over it. Headings show in bold, not in heading size. Fenced code blocks and tables show their raw text and get no chip.
+- Draws the reading's replies in the pane block by block, as the transcript draws them. The block that holds the spoken word is drawn by the pane, with a chip on the word in reverse video: the text color behind it, with the background color over it. While the chip is in a block, that block's spacing can differ a little from the others. The pane's own drawing covers headings (larger for `#` and `##`), bullet and numbered lists with hanging indents, quotes, rules, tables as columns, and bold, italic, strikethrough, inline code and links (underlined; the target is dropped). Fenced code blocks use Claude Code's code view and get no chip, since they are not read. In that block, nested blocks, `_italic_`, escapes, images and HTML are not drawn.
 - Scrolls the pane to center the paragraph that holds the spoken word. A paragraph taller than the pane shows its top.
-- The desktop app docks the pane beside the chat. The terminal docks it beside a fullscreen transcript from 110 columns, else shows it above the prompt. A pane that auto-read opens waits for 144 columns.
+- The desktop app docks the pane beside the chat. The terminal docks it beside a fullscreen transcript from 110 columns, else shows it above the prompt. With **Read new replies aloud** on, submitting a prompt opens the pane, so each auto-read fills it at any width. An auto-read that opens the pane at turn end waits for 144 columns.
 - Holds the last word between words.
 - Stops 2 s after the app reports the reading ended, or after 60 s with no playback. A stall while synthesis catches up does not stop it.
 

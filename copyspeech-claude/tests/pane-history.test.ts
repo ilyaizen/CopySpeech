@@ -51,8 +51,8 @@ test("a new Read aloud replaces the reply the pane shows", async ($, on) => {
   await clock.advance(250);
   const pane = await $.ui.mount(PANE);
   await pane.redraw();
-  expect(await pane.find({ type: "Text", text: /Old/ })).toBeUndefined();
-  expect(await pane.find({ type: "Text", text: /New/ })).toBeDefined();
+  expect(await pane.find({ type: "Markdown", text: /Old/ })).toBeUndefined();
+  expect(await pane.find({ type: "Markdown", text: /New/ })).toBeDefined();
   await pane.unmount();
   await one.unmount();
   await two.unmount();
@@ -213,7 +213,7 @@ test("the captions pane keeps the last reading after it stops", async ($, on) =>
   status = { active: false };
   await clock.advance(2500);
   await pane.redraw();
-  expect(await pane.find({ type: "Text", text: /Hello/ })).toBeDefined();
+  expect(await pane.find({ type: "Markdown", text: /Hello/ })).toBeDefined();
   expect(await pane.find({ type: "Text", text: "Nothing read yet." })).toBeUndefined();
   await pane.unmount();
   await reply.unmount();
@@ -239,12 +239,45 @@ test("a paragraph's Read button speaks only that paragraph", async ($, on) => {
   await reply.press({ key: "play-reply-2" });
   await clock.advance(250);
   const pane = await $.ui.mount(PANE);
+  expect(await pane.find({ type: "Svg" })).toBeDefined();
+  // The label's room for the mark: two characters, then "Read".
+  expect((await pane.find({ key: "read-reply-2-1" }))?.props.label).toMatch(/^.{2}Read$/);
   await pane.press({ key: "read-reply-2-1" });
   await clock.advance(250);
   const last = bodies[bodies.length - 1] ?? "";
   expect(last).toContain("Second paragraph here");
   expect(last).not.toContain("First paragraph");
   expect(last).not.toContain("Third paragraph");
+  await pane.unmount();
+  await reply.unmount();
+});
+
+test("a paragraph's Read button on a block with nothing to say keeps the reading", async ($, on) => {
+  const clock = mock.clock(on);
+  const calls: string[] = [];
+  on("http.fetch", (_, e) => {
+    calls.push(e.url.slice(e.url.lastIndexOf("/")));
+    return { value: { status: 200, ok: true, headers: {}, text: "{}" } };
+  });
+  const reply = await $.ui.mount({
+    plugin: "copyspeech",
+    surface: "desktop",
+    component: "AssistantMessage",
+    requestId: "reply-3",
+    props: {
+      text: "First paragraph here.\n\n## A heading\n\nThird paragraph here.",
+      isFirstOfReply: true
+    }
+  });
+  await reply.press({ key: "play-reply-3" });
+  await clock.advance(250);
+  const pane = await $.ui.mount(PANE);
+  const before = calls.length;
+  // Skip sections is on by default, so the heading block has no speech.
+  await pane.press({ key: "read-reply-3-1" });
+  await clock.advance(250);
+  expect(calls.slice(before)).not.toContain("/stop");
+  expect(calls.slice(before)).not.toContain("/speak");
   await pane.unmount();
   await reply.unmount();
 });

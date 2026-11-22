@@ -3,6 +3,8 @@ import type { EngineInterface, Register } from "claude-code";
 
 import type { Reading } from "../types";
 import { ICON_SVG } from "./icon";
+import { blockLines, blocks, fenceAfter, fenceSpans, inlineSpans } from "./markdown";
+import type { Block, Line } from "./markdown";
 
 // Port of copyspeech-hermes to Claude Code. CopySpeech's control server does the
 // speaking; this mod draws the play button, the captions pane, and the Read aloud
@@ -22,8 +24,10 @@ const MARK_ROOM = "  ";
 // The spoken word's chip: reverse video, the text color behind the word and the
 // inverse text over it. A background moves no glyph, so words after the chip never move.
 const CHIP = { backgroundColor: "text", color: "inverseText" } as const;
-// The captions pane: the reading's replies as plain text, with the chip on the spoken word.
+// The captions pane: the reading's replies drawn from their Markdown, with the chip on the spoken word.
 const PANE = "captions";
+// Theme color for link text, so the pane follows the person's theme.
+const LINK = "suggestion";
 const EXCERPT_MODES = ["both", "top", "bottom"];
 
 // Rows and the band read `reading`, which changes only at start, pause, resume and
@@ -53,11 +57,11 @@ type Status = {
   fragment_index?: number;
 };
 
-// Markdown that is not spoken: fenced code blocks (``` or ~~~), link targets, HTML
+// Markdown that is not spoken, besides fenced code blocks (fenceSpans): link targets and HTML
 // tags. Inline `code` is spoken; speakable() drops its backticks and reads a dot in it as "dot".
-const UNSPOKEN = /(```|~~~)[\s\S]*?(?:\1|$)|\]\([^)\n]*\)|<[^>\n]+>/g;
-// A line that opens or closes a fenced code block.
-const FENCE_LINE = /^\s*(?:```|~~~)/;
+const UNSPOKEN = /\]\([^)\n]*\)|<[^>\n]+>/g;
+// The bullet or number that opens a list item: never spoken, so never a caption token.
+const LIST_MARK = /^[ \t]*(?:[-+*]|\d+[.)])[ \t]+/gm;
 // Lines a skip-sections read drops: headings, bullet and numbered items, horizontal rules, table rows.
 const SKIPPED = /^\s{0,3}(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\|| ?([-*_]) ?(?:\1 ?){2,}$)/;
 
@@ -79,10 +83,14 @@ const DOT_MARK = "\u0001";
 // A TTS engine reads "." as a pause, so a dot in inline code is said as the word "dot".
 // ponytail: pairs backticks left to right; one stray backtick can mark prose as code.
 export function speakable(md: string) {
-  const skip = [...md.matchAll(UNSPOKEN)].map((m) => ({
-    s: m.index ?? 0,
-    e: (m.index ?? 0) + m[0].length
-  }));
+  const fences = fenceSpans(md);
+  const skip = [
+    ...fences.map((f) => ({ s: f.start, e: f.end })),
+    ...[...md.matchAll(UNSPOKEN), ...md.matchAll(LIST_MARK)].map((m) => ({
+      s: m.index ?? 0,
+      e: (m.index ?? 0) + m[0].length
+    }))
+  ];
   const skipped = (at: number) => skip.some((r) => at >= r.s && at < r.e);
   const dots = [...md.matchAll(CODE_SPAN)]
     .flatMap((span) =>
@@ -97,10 +105,13 @@ export function speakable(md: string) {
   ].sort((a, b) => a.start - b.start);
   let marked = md;
   for (const at of dots) marked = marked.slice(0, at) + DOT_MARK + marked.slice(at + 1);
+  // Same length as md until here, so the fence offsets hold; cut the last fence first.
+  for (const f of [...fences].reverse())
+    marked = marked.slice(0, f.start) + " " + marked.slice(f.end);
   const speech = marked
     .replace(UNSPOKEN, " ")
     .replace(/`+/g, "")
-    .replace(/^[ \t]*(?:[-+*]|\d+[.)])[ \t]+/gm, "")
+    .replace(LIST_MARK, "")
     .replace(/[#*_>|~[]+/g, " ")
     .replace(/[ \t]+/g, " ")
     .trim()
@@ -136,22 +147,20 @@ function maskSkipped(md: string): string {
     .join("\n");
 }
 
-export type Block = { start: number; end: number };
-
 // Paragraphs as [start, end) offsets into md. Blank lines split them, and a skipped
 // line is neither text nor a split, so a list between two sentences joins them.
 function paragraphs(md: string, skip: boolean): Block[] {
   const out: Block[] = [];
   let from = -1;
   let to = -1;
-  let inFence = false;
+  let open: string | null = null;
   let offset = 0;
   for (const line of md.split("\n")) {
     const start = offset;
     offset += line.length + 1;
-    if (FENCE_LINE.test(line)) inFence = !inFence;
+    open = fenceAfter(open, line);
     if (skip && SKIPPED.test(line)) continue;
-    if (line.trim() === "" && !inFence) {
+    if (line.trim() === "" && open === null) {
       if (from >= 0) out.push({ start: from, end: to });
       from = -1;
     } else {
@@ -262,117 +271,6 @@ export function align(words: CaptionWord[], tokens: Token[], from: number) {
   return { ok: mapped > 0 && mapped * 2 >= words.length, map, cursor };
 }
 
-export type Span = { text: string; bold?: true; italic?: true; mono?: true; hit?: true };
-
-// Blank-line separated blocks, never splitting a fenced code block.
-export function blocks(md: string): Block[] {
-  const out: Block[] = [];
-  let from = -1;
-  let inFence = false;
-  let offset = 0;
-  for (const line of md.split("\n")) {
-    const end = offset + line.length;
-    if (FENCE_LINE.test(line)) inFence = !inFence;
-    if (line.trim() === "" && !inFence) {
-      if (from >= 0) out.push({ start: from, end: offset - 1 });
-      from = -1;
-    } else if (from < 0) from = offset;
-    offset = end + 1;
-  }
-  if (from >= 0) out.push({ start: from, end: md.length });
-  return out;
-}
-
-// One block's markdown as styled spans; `mark` (offsets into the whole reply) gets `hit`.
-// ponytail: covers headings, list markers, **bold**, *italic*, `code`, [links](url); tables and fences stay raw text.
-export function inlineSpans(md: string, block: Block, mark: [number, number] | null): Span[] {
-  const chars: Span[] = [];
-  const push = (text: string, flags: Omit<Span, "text">) => chars.push({ text, ...flags });
-  let bold = false;
-  let italic = false;
-  let mono = false;
-  let lineStart = true;
-  let i = block.start;
-  while (i < block.end) {
-    const rest = md.slice(i, block.end);
-    if (lineStart) {
-      lineStart = false;
-      const heading = /^#{1,6}\s+/.exec(rest);
-      const bullet = /^(\s*)[-*+]\s+/.exec(rest);
-      const quote = /^>\s?/.exec(rest);
-      if (heading) {
-        i += heading[0].length;
-        bold = true;
-        continue;
-      }
-      if (bullet) {
-        push(`${bullet[1] ?? ""}• `, {});
-        i += bullet[0].length;
-        continue;
-      }
-      if (quote) {
-        i += quote[0].length;
-        continue;
-      }
-    }
-    if (!mono && rest.startsWith("**")) {
-      bold = !bold;
-      i += 2;
-      continue;
-    }
-    if (rest.startsWith("`")) {
-      mono = !mono;
-      i += 1;
-      continue;
-    }
-    if (!mono && rest.startsWith("*")) {
-      italic = !italic;
-      i += 1;
-      continue;
-    }
-    const link = mono ? null : /^\]\([^)\n]*\)/.exec(rest);
-    if (link) {
-      i += link[0].length;
-      continue;
-    }
-    const ch = md[i] ?? "";
-    if (!mono && ch === "[") {
-      i += 1;
-      continue;
-    }
-    if (ch === "\n") {
-      push("\n", {});
-      // A heading's bold ends with its line.
-      bold = false;
-      lineStart = true;
-      i += 1;
-      continue;
-    }
-    const span: Span = { text: ch };
-    if (bold) span.bold = true;
-    if (italic) span.italic = true;
-    if (mono) span.mono = true;
-    if (mark !== null && i >= mark[0] && i < mark[1]) span.hit = true;
-    chars.push(span);
-    i += 1;
-  }
-  // Merge neighbours that share every flag.
-  const out: Span[] = [];
-  for (const c of chars) {
-    const last = out[out.length - 1];
-    if (
-      last &&
-      last.bold === c.bold &&
-      last.italic === c.italic &&
-      last.mono === c.mono &&
-      last.hit === c.hit
-    ) {
-      last.text += c.text;
-    } else out.push({ ...c });
-  }
-  return out;
-}
-
 // Rendered markdown per AssistantMessage row, and the rows first drawn in the
 // current turn (the auto-read target). Module variables restart on reload; the
 // atoms survive.
@@ -472,9 +370,10 @@ function shownRows(ids: string[]): ShownRow[] {
 
 // Speaks `text`; the captions pane shows `ids`, the AssistantMessage rows it comes from.
 async function start($: EngineInterface, ids: string[], text: Spoken) {
+  // Nothing to say keeps the reading that plays: a press on a silent block must not stop it.
+  if (text.speech.trim() === "" || ids.length === 0) return;
   const current = await read($, reading);
   if (current !== null) await post($, "/stop", { request_id: current.id });
-  if (text.speech.trim() === "" || ids.length === 0) return;
   counter += 1;
   const id = `claude.${Date.now()}.${counter}`;
   await paint($, "", null);
@@ -649,6 +548,13 @@ export const register: Register = (on, options) => {
     return { text: "CopySpeech settings are in the companion pane." };
   });
 
+  // The person's own prompt places the captions pane at any width. An auto-read that opens
+  // it at turn end is unasked, and the engine may hold that open undrawn on a narrow window.
+  on("prompt.submit", async ($, e, next) => {
+    if (options.autoRead === true && e.isMeta !== true) void openPane($, showWord);
+    return next(e);
+  });
+
   on("turn.start", async ($, e, next) => {
     if (e.agentId === undefined) turnRows = [];
     return next(e);
@@ -763,15 +669,20 @@ export const register: Register = (on, options) => {
     );
   });
 
-  // The captions pane: the reading's replies as plain text, one keyed Box per block,
-  // the chip on the spoken word. It alone reads `spoken`, so a word redraws it alone.
-  // A fence or a table shows its raw text and gets no chip.
+  // The captions pane: the reading's replies drawn from their Markdown, one keyed Box per
+  // block, the chip on the spoken word. It alone reads `spoken`, so a word redraws it alone.
   on("ui.render", { component: "Pane", requestId: PANE }, async ($, e) => {
     const r = await read($, reading);
     const s = await read($, spoken);
     const list = await read($, history);
     const open = await read($, settingsOpen);
-    const { Box, Button, Text } = $.ui.resolve(e);
+    const ui = $.ui.resolve(e);
+    const { Box, Button, Code, Markdown, Text } = ui;
+    // The CopySpeech mark a paragraph's Read button draws in the room its label leaves.
+    const markSvg =
+      e.surface !== "terminal" && "Svg" in ui ? (
+        <ui.Svg source={ICON_SVG} alt="CopySpeech" width={14} height={14} />
+      ) : null;
     // A Button redraws with every spoken word, so the settings show only while nothing is read.
     const save = (field: string, value: boolean | number | string) => () =>
       void $.clock.after(0, async () => {
@@ -851,46 +762,144 @@ export const register: Register = (on, options) => {
           () => undefined
         );
       });
-    // The reply the latest reading covers. A paragraph's ▶ shows on hover at its side.
-    const replies = list.map((entry) => (
-      <Box key={`reply-${entry.row}`} flexDirection="column" gap={2}>
-        {blocks(entry.md).map((b, n) => {
-          const raw = entry.md.slice(b.start, b.end);
-          const isRaw = FENCE_LINE.test(raw) || /^\s*\|/.test(raw);
-          const mark = s !== null && s.row === entry.row ? s.at : null;
-          return (
-            <Box key={blockKey(entry.row, n)}>
-              <Box>
-                {isRaw ? (
-                  <Text mono>{raw}</Text>
-                ) : (
-                  <Text>
-                    {inlineSpans(entry.md, b, mark).map((sp) => (
-                      <Text
-                        bold={sp.bold}
-                        italic={sp.italic}
-                        mono={sp.mono}
-                        {...(sp.hit ? CHIP : {})}
-                      >
-                        {sp.text}
-                      </Text>
-                    ))}
-                  </Text>
-                )}
+    // A paragraph's Read button: the reply's mark and label, the mark in the room the label leaves.
+    const paragraphRead = (row: string, md: string, n: number, b: Block) => {
+      const read = (
+        <Button
+          key={`read-${row}-${n}`}
+          label={markSvg === null ? "Read" : `${MARK_ROOM}Read`}
+          onPress={readParagraph(row, md, b.start, b.end)}
+        />
+      );
+      if (markSvg === null) return read;
+      return (
+        <Box>
+          {read}
+          <Box position="absolute" left={0} top={0} bottom={0} alignItems="center" paddingLeft="sm">
+            {markSvg}
+          </Box>
+        </Box>
+      );
+    };
+    // The reply the latest reading covers. A paragraph's Read button shows on hover at its side.
+    const replies = list.map((entry) => {
+      const mark = s !== null && s.row === entry.row ? s.at : null;
+      const inline = (from: number, to: number) =>
+        inlineSpans(entry.md, from, to, mark).map((sp) => (
+          <Text
+            bold={sp.bold}
+            italic={sp.italic}
+            mono={sp.mono}
+            strikethrough={sp.strike}
+            underline={sp.link}
+            color={sp.link ? LINK : undefined}
+            {...(sp.hit ? CHIP : {})}
+          >
+            {sp.text}
+          </Text>
+        ));
+      // One drawn row of a block. Text holds the chip; a fence is not spoken, so it gets none.
+      const drawLine = (ln: Line, k: number) => {
+        switch (ln.kind) {
+          case "heading":
+            return (
+              <Text key={String(k)} weight="bold" size={ln.level <= 2 ? "heading" : "body"}>
+                {inline(ln.start, ln.end)}
+              </Text>
+            );
+          case "item":
+            return (
+              <Box key={String(k)} flexDirection="row" paddingLeft={Math.min(ln.indent, 4) * 2}>
+                <Box flexShrink={0}>
+                  <Text>{`${ln.marker} `}</Text>
+                </Box>
+                <Box flexShrink={1}>
+                  <Text>{inline(ln.start, ln.end)}</Text>
+                </Box>
               </Box>
-              <Box position="absolute" right={0} top={0} display="none" hover={{ display: "flex" }}>
-                <Button
-                  key={`read-${entry.row}-${n}`}
-                  plain={true}
-                  label="▶"
-                  onPress={readParagraph(entry.row, entry.md, b.start, b.end)}
-                />
+            );
+          case "quote":
+            return (
+              <Box key={String(k)} flexDirection="row">
+                <Box flexShrink={0}>
+                  <Text dimColor>{"│ "}</Text>
+                </Box>
+                <Box flexShrink={1}>
+                  <Text italic>{inline(ln.start, ln.end)}</Text>
+                </Box>
               </Box>
-            </Box>
-          );
-        })}
-      </Box>
-    ));
+            );
+          case "rule":
+            return (
+              <Text key={String(k)} dimColor>
+                {"─".repeat(24)}
+              </Text>
+            );
+          case "fence":
+            return (
+              <Code
+                key={String(k)}
+                source={ln.code}
+                language={ln.lang === "" ? undefined : ln.lang}
+              />
+            );
+          case "table": {
+            const row = (cells: Block[], head: boolean, i: number) => (
+              <Box key={String(i)} flexDirection="row" gap="sm">
+                {cells.map((c, j) => (
+                  <Box
+                    key={String(j)}
+                    flexGrow={1}
+                    flexShrink={1}
+                    width={`${Math.floor(100 / cells.length)}%`}
+                  >
+                    <Text weight={head ? "bold" : undefined}>{inline(c.start, c.end)}</Text>
+                  </Box>
+                ))}
+              </Box>
+            );
+            return (
+              <Box key={String(k)} flexDirection="column">
+                {ln.header === null ? null : row(ln.header, true, -1)}
+                {ln.rows.map((cells, i) => row(cells, false, i))}
+              </Box>
+            );
+          }
+          default:
+            return <Text key={String(k)}>{inline(ln.start, ln.end)}</Text>;
+        }
+      };
+      // The block that holds the spoken word is drawn here, so the chip can sit on the word.
+      // Every other block is the engine's own Markdown, which is the transcript's look.
+      return (
+        <Box key={`reply-${entry.row}`} flexDirection="column" gap={1}>
+          {blocks(entry.md).map((b, n) => {
+            const holdsWord =
+              s !== null && s.row === entry.row && s.at[0] >= b.start && s.at[0] < b.end;
+            return (
+              <Box key={blockKey(entry.row, n)}>
+                <Box flexDirection="column">
+                  {holdsWord ? (
+                    blockLines(entry.md, b).map(drawLine)
+                  ) : (
+                    <Markdown text={entry.md.slice(b.start, b.end)} />
+                  )}
+                </Box>
+                <Box
+                  position="absolute"
+                  right={0}
+                  top={0}
+                  display="none"
+                  hover={{ display: "flex" }}
+                >
+                  {paragraphRead(entry.row, entry.md, n, b)}
+                </Box>
+              </Box>
+            );
+          })}
+        </Box>
+      );
+    });
     // Settings show only while nothing is read: their Buttons would redraw with each spoken word.
     // The reply area takes the free height, so the settings sit at the bottom of the pane.
     return (

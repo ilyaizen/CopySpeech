@@ -190,6 +190,53 @@ test("a reading opens the captions pane and puts a chip on the spoken word there
   await playing.unmount();
 });
 
+test("a reply's blocks without the spoken word draw as the engine's Markdown; the spoken block draws the chip", async ($, on) => {
+  const clock = mock.clock(on);
+  const status = {
+    active: true,
+    paused: false,
+    position_ms: 350,
+    fragment_index: 0,
+    captions: {
+      text: "Hello there.",
+      words: [
+        { text_start: 0, text_end: 5, start_ms: 0, end_ms: 300 },
+        { text_start: 6, text_end: 11, start_ms: 300, end_ms: 600 }
+      ]
+    }
+  };
+  on("http.fetch", (_, e) => ({
+    value: {
+      status: 200,
+      ok: true,
+      headers: {},
+      text: e.url.endsWith("/status") ? JSON.stringify(status) : "{}"
+    }
+  }));
+  on("command.register", (_, e) => ({ value: { command: e.name } }));
+  on("session.start", (_, e) => ({ cwd: e.cwd }));
+  on("ui.open", () => ({ value: { isPlaced: true } }));
+  await $.session.start({ cwd: ".", surface: "desktop", isInteractive: true });
+  const reply = await $.ui.mount({
+    plugin: "copyspeech",
+    surface: "desktop",
+    component: "AssistantMessage",
+    requestId: "reply-1",
+    props: { text: "First paragraph here.\n\nHello there.", isFirstOfReply: true }
+  });
+  await reply.press({ key: "play-reply-1" });
+  await clock.advance(250);
+  const pane = await $.ui.mount(PANE);
+  await pane.redraw();
+  expect(await pane.find({ type: "Markdown", text: "First paragraph here." })).toBeDefined();
+  expect(await pane.find({ type: "Text", text: /^First/ })).toBeUndefined();
+  // Position 350 ms is inside "there" (300-600 ms).
+  const word = await pane.find({ type: "Text", text: /^there$/ });
+  expect(word?.props).toEqual({ backgroundColor: "text", color: "inverseText" });
+  await pane.unmount();
+  await reply.unmount();
+});
+
 test("Pause stays in the band while the spoken word moves in the pane", async ($, on) => {
   const { playing, other, band, pane, status, clock } = await playHello($, on);
   status.position_ms = 100;
