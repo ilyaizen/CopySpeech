@@ -12,7 +12,7 @@ const IGNORE = new Set(
     "docs_internal .zcode .hermes node_modules .venv .next target .git Handy prompts skills " +
     ".vercel dist out gen .svelte-kit .obsidian ui build icons .agent .agents .claude .tauri " +
     ".ruff_cache __pycache__ .gemini .opencode .kilocode archive backups bun.lock openspec .planning"
-  ).split(" "),
+  ).split(" ")
 );
 
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);

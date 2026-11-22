@@ -693,7 +693,9 @@ export const register: Register = (on, options) => {
     $.clock.every(
       HEALTH_MS,
       () =>
-        void isUp($).then((up) => (up ? undefined : $.ui.close({ id: PANE }).catch(() => undefined)))
+        void isUp($).then((up) =>
+          up ? undefined : $.ui.close({ id: PANE }).catch(() => undefined)
+        )
     );
     return next(e);
   });
