@@ -1426,3 +1426,126 @@ it("ignores a late chunk of a reading dropped by a scoped stop", async () => {
   expect(playbackStore.isPlaying).toBe(false);
   playbackStore.handleStop();
 });
+
+// Fragment prerender: the next fragment renders while the current one plays,
+// so activation at the seam only swaps the blob URL.
+
+class FakeAudioBuffer {
+  length: number;
+  numberOfChannels: number;
+  sampleRate: number;
+  private data: Float32Array[];
+  constructor(options: { length: number; numberOfChannels: number; sampleRate: number }) {
+    this.length = options.length;
+    this.numberOfChannels = options.numberOfChannels;
+    this.sampleRate = options.sampleRate;
+    this.data = [];
+    for (let c = 0; c < options.numberOfChannels; c++) {
+      this.data.push(new Float32Array(options.length));
+    }
+  }
+  get duration(): number {
+    return this.length / this.sampleRate;
+  }
+  getChannelData(channel: number): Float32Array {
+    return this.data[channel];
+  }
+  copyToChannel(source: Float32Array, channel: number): void {
+    this.data[channel].set(source.subarray(0, Math.min(source.length, this.length)));
+  }
+}
+
+/**
+ * Stub what jsdom lacks so a prerender runs its real pipeline: the AudioBuffer
+ * constructor and blob URL registry. The URL assignment persists for the file;
+ * other tests never hit the real createObjectURL (buildPlaybackUrl is spied).
+ */
+function stubAudioRendering() {
+  vi.stubGlobal("AudioBuffer", FakeAudioBuffer);
+  const revoked: string[] = [];
+  let created = 0;
+  Object.assign(URL, {
+    createObjectURL: vi.fn(() => `blob:pre-${++created}`),
+    revokeObjectURL: vi.fn((url: string) => {
+      revoked.push(url);
+    })
+  });
+  decode.mockImplementation(
+    async () => new FakeAudioBuffer({ length: 8000, numberOfChannels: 1, sampleRate: 8000 })
+  );
+  return { revoked };
+}
+
+it("plays the next fragment from its prerender without re-decoding at the seam", async () => {
+  const { revoked } = stubAudioRendering();
+  await sendAudio(0, undefined, 3);
+  await vi.waitFor(() => expect(playSpy).toHaveBeenCalledTimes(1));
+  expect(decode).toHaveBeenCalledTimes(1);
+  await sendAudio(1, undefined, 3);
+  // Fragment 1 renders while fragment 0 plays.
+  await vi.waitFor(() => expect(decode).toHaveBeenCalledTimes(2));
+  audio.dispatchEvent(new Event("ended"));
+  await vi.waitFor(() => expect(playSpy).toHaveBeenCalledTimes(2));
+  // Activation reused the prerender: no third decode, and the playing URL is
+  // the prerendered one, not the on-demand fallback.
+  expect(decode).toHaveBeenCalledTimes(2);
+  expect(audio.src).toBe("blob:pre-1");
+  expect(playbackStore.currentFragmentIndex).toBe(1);
+  // Fragment 2 prerenders while fragment 1 plays; a stop discards its URL.
+  await sendAudio(2, undefined, 3);
+  await vi.waitFor(() => expect(decode).toHaveBeenCalledTimes(3));
+  playbackStore.handleStop();
+  await vi.waitFor(() => expect(revoked).toContain("blob:pre-2"));
+});
+
+it("awaits an in-flight prerender instead of rendering the fragment again", async () => {
+  stubAudioRendering();
+  await sendAudio(0, undefined, 2);
+  await vi.waitFor(() => expect(playSpy).toHaveBeenCalledTimes(1));
+  // Hold the prerender's decode open to simulate render work still running
+  // when the current fragment ends.
+  const gate = Promise.withResolvers<FakeAudioBuffer>();
+  decode.mockImplementationOnce(() => gate.promise);
+  await sendAudio(1, undefined, 2);
+  await vi.waitFor(() => expect(decode).toHaveBeenCalledTimes(2));
+  audio.dispatchEvent(new Event("ended"));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Fragment 1 neither played nor re-rendered while its prerender ran.
+  expect(playSpy).toHaveBeenCalledTimes(1);
+  expect(decode).toHaveBeenCalledTimes(2);
+  gate.resolve(new FakeAudioBuffer({ length: 8000, numberOfChannels: 1, sampleRate: 8000 }));
+  await vi.waitFor(() => expect(playSpy).toHaveBeenCalledTimes(2));
+  expect(audio.src).toBe("blob:pre-1");
+});
+
+it("renders the next fragment while paused without resuming playback", async () => {
+  stubAudioRendering();
+  await sendAudio(0, undefined, 2);
+  await vi.waitFor(() => expect(playSpy).toHaveBeenCalledTimes(1));
+  playbackStore.pausePlayback();
+  expect(playbackStore.isPaused).toBe(true);
+  playSpy.mockClear();
+  await sendAudio(1, undefined, 2);
+  await vi.waitFor(() => expect(decode).toHaveBeenCalledTimes(2));
+  // Prerender touches neither the element nor the pause state.
+  expect(playbackStore.isPaused).toBe(true);
+  expect(playSpy).not.toHaveBeenCalled();
+  playbackStore.resumePlayback();
+  expect(playSpy).toHaveBeenCalledTimes(1);
+  expect(playbackStore.isPaused).toBe(false);
+});
+
+it("re-renders a prepared fragment on demand when the pitch changed while it waited", async () => {
+  const { revoked } = stubAudioRendering();
+  await sendAudio(0, undefined, 2);
+  await vi.waitFor(() => expect(playSpy).toHaveBeenCalledTimes(1));
+  await sendAudio(1, undefined, 2);
+  await vi.waitFor(() => expect(decode).toHaveBeenCalledTimes(2));
+  playbackStore.syncPlaybackConfig(100, 1, 0.9);
+  audio.dispatchEvent(new Event("ended"));
+  await vi.waitFor(() => expect(playSpy).toHaveBeenCalledTimes(2));
+  // The pitch-1 prerender was discarded, and activation re-rendered on demand.
+  expect(revoked).toContain("blob:pre-1");
+  expect(audio.src).toBe("blob:history-audio");
+  expect(playbackStore.currentFragmentIndex).toBe(1);
+});

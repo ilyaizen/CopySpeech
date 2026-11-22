@@ -14,6 +14,7 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 - Re-sync `playbackStore` from its own `config-changed` listener. Pages that only `set_config` never update it.
 - Streaming playback takes the batch `audio-fragment-ready` path for a whole-buffer effect (all but walkie-talkie, see `effect_streams_live`), a speed other than 1, or a cold backend (`allows_streaming_playback`). Walkie-talkie runs live on the PCM path (`effects/live.ts`).
 - Emit the streaming `is_final` marker on the last fragment only. An intermediate one arms the completion timer mid-passage.
+- Batch prerender keeps one fragment rendered ahead (the queue entry behind the playing one, in a single slot keyed by index and generation). A stop discards it, preparing never touches the audio element or the context state (so a paused reading stays paused), and activation awaits an in-flight prerender instead of restarting the render.
 - Signal a failed streamed reading with `playback-stream-failed` and its `session_id`, never `playback-stop` (which cuts every reading).
 - Reset a completed reading's retained replay fragments when the next reading starts. A streamed reading queues none and would inherit them.
 - Give each reading `AbortScope::begin_reading()` or `begin_reading_for_request(request)` and check `scope.aborted()`. `begin()` and `begin_for_request()` are helper scopes with reading id 0. Never clear the global abort state at a reading's start: it un-aborts a stream still draining.

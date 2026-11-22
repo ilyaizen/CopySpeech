@@ -20,6 +20,7 @@ import { AudioAnalyser, type EmitPayload } from "./playback/analyser.js";
 import { PcmStreamScheduler, type StreamChunkPayload } from "./playback/pcm-stream.js";
 import { stretchBuffer } from "./playback/time-stretch.js";
 import { getEffect } from "./playback/effects/registry.js";
+import type { Effect } from "./playback/effects/types.js";
 import { createLiveEffect, type LiveEffect } from "./playback/effects/live.js";
 import { FragmentQueue, type QueuedFragment } from "./playback/fragment-queue.js";
 import { hudStore } from "./hud-store.svelte.js";
@@ -40,6 +41,29 @@ const MAX_HELD_STREAM_BYTES = 32 * 1024 * 1024;
 
 /** Most dropped, refused or failed reading ids remembered to reject late chunks. */
 const MAX_IGNORED_STREAM_READINGS = 64;
+
+/** A fragment decoded, rendered and encoded ahead of its activation. */
+interface PrerenderedFragment {
+  index: number;
+  /** Pitch and effect the render used; a mismatch at activation re-renders. */
+  pitch: number;
+  effectId: EffectId;
+  url: string;
+  /** Decoded duration in ms, mirroring what the on-demand path reports. */
+  durationMs: number;
+  /** Raw encoded bytes, stored into `_originalBytes` at activation. */
+  bytes: ArrayBuffer;
+  /** Pristine decoded buffer, stored into `_decodedBuffer` at activation. */
+  decoded: AudioBuffer;
+}
+
+/** The one fragment-ahead render: in flight or settled, unused so far. */
+interface PendingPrerender {
+  index: number;
+  /** Playback generation the render belongs to; a bump discards it. */
+  generation: number;
+  promise: Promise<PrerenderedFragment | null>;
+}
 
 /** One reading's streamed chunks, held while another reading owns the speakers. */
 interface HeldStreamRun {
@@ -386,6 +410,8 @@ class PlaybackStore {
   private _decodedBuffer: AudioBuffer | null = null;
   private _originalBytes: ArrayBuffer | null = null;
   private _cachedPitchUrl: { ratio: number; effectId: EffectId; url: string } | null = null;
+  /** The fragment behind the current one, rendered while the current plays. */
+  private _prerender: PendingPrerender | null = null;
   // The registration in flight or done. Teardown takes it before it resolves, so a
   // teardown that lands mid-setup (HMR remounting GlobalPlayer) still unlistens
   // what that setup registers, and the next setup registers afresh.
@@ -481,7 +507,76 @@ class PlaybackStore {
     // The audible reading: its playback-finished must carry this id.
     this._batchReadingId = fragment.readingId;
     void this._emit?.("playback-fragment-audible", { index: fragment.index, text: fragment.text });
-    return this.handleAudioReady(fragment.audioBase64);
+    return this._playFragmentAudio(fragment);
+  }
+
+  /** Play a fragment from its prerender when one matches, else decode and render on demand. */
+  private async _playFragmentAudio(fragment: QueuedFragment): Promise<void> {
+    // Synchronous fast path: with nothing prepared, decode and render on demand
+    // without yielding first, so activation state flips in the calling tick.
+    if (this._prerender === null) {
+      await this.handleAudioReady(fragment.audioBase64);
+      return;
+    }
+    const pre = await this._takePrerenderedFragment(fragment);
+    if (pre) {
+      await this._activatePrerendered(pre);
+      return;
+    }
+    await this.handleAudioReady(fragment.audioBase64);
+  }
+
+  /**
+   * Activate an already rendered fragment: the seam path. Mirrors
+   * `handleAudioReady`'s state changes minus the decode and render that
+   * prerender already did.
+   */
+  private async _activatePrerendered(pre: PrerenderedFragment): Promise<void> {
+    const generation = this._playbackGeneration;
+    this.isLoadingAudio = true;
+    this.error = null;
+    this.hasCachedAudio = false;
+    try {
+      const ctx = this._audioCtx;
+      if (!ctx) throw new Error("Audio player is not ready");
+      this._originalBytes = pre.bytes;
+      this._decodedBuffer = pre.decoded;
+      if (this._cachedPitchUrl) {
+        URL.revokeObjectURL(this._cachedPitchUrl.url);
+      }
+      // The playing clip's URL moves into the shared cache slot, so replay and
+      // pitch or effect invalidation keep one owner.
+      this._cachedPitchUrl = { ratio: pre.pitch, effectId: pre.effectId, url: pre.url };
+      hudStore.setAccurateDurationMs(pre.durationMs);
+      // Emit to HUD window for cross-window state sync
+      void this._emit?.("hud:audio-duration", pre.durationMs);
+      // Resume AudioContext if suspended (required on clean Windows 11 / strict autoplay policies)
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
+      if (generation !== this._playbackGeneration) return;
+      // Wire AnalyserNode once per audio element (guard prevents double-wiring)
+      if (this._audioEl && !this._analyser.getAnalyser()) {
+        this._analyser.setup(this._audioEl, ctx, {
+          emitTo: this._emitTo,
+          hudEnabled: () => this._hudEnabled
+        });
+      }
+      if (!this._audioEl) throw new Error("Audio player is not ready");
+      this._audioEl.src = pre.url;
+      this._analyser.start(); // Start amplitude capture BEFORE audio plays
+      await this.playAudio();
+      if (generation !== this._playbackGeneration) return;
+      this.hasCachedAudio = true;
+    } catch (e) {
+      if (generation !== this._playbackGeneration) return;
+      this.handleStop();
+      this.error = `Audio playback failed: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      if (generation === this._playbackGeneration) this.isLoadingAudio = false;
+      // While this fragment plays, render the next queued one.
+      this._maybePrerenderNextFragment();
+    }
   }
 
   setAudioElement(el: HTMLAudioElement | null) {
@@ -616,39 +711,156 @@ class PlaybackStore {
       this._cachedPitchUrl = null;
     }
     const effect = getEffect(effectId);
-    let blob: Blob;
+    let url: string;
     if (pitchRatio === 1.0 && !effect && this._originalBytes) {
       const mimeType = detectAudioMimeType(this._originalBytes);
-      blob = new Blob([this._originalBytes], { type: mimeType });
-    } else if (this._decodedBuffer && this._audioCtx) {
-      let buffer: AudioBuffer;
-      if (pitchRatio === 1.0) {
-        // Copy to avoid mutating cached decoded buffer when applying fade-in
-        buffer = new AudioBuffer({
-          length: this._decodedBuffer.length,
-          numberOfChannels: this._decodedBuffer.numberOfChannels,
-          sampleRate: this._decodedBuffer.sampleRate
-        });
-        for (let c = 0; c < this._decodedBuffer.numberOfChannels; c++) {
-          buffer.copyToChannel(this._decodedBuffer.getChannelData(c), c);
-        }
-      } else {
-        // Pitch shift only - duration stays native so caption positions map 1:1.
-        buffer = stretchBuffer(this._decodedBuffer, 1, pitchRatio);
-      }
-      // Fade the speech before the effect: an effect may open with its own onset.
-      applyFadeIn(buffer, 10);
-      if (effect) {
-        buffer = await effect.process(buffer, this._audioCtx);
-      }
-      blob = audioBufferToWavBlob(buffer);
+      const blob = new Blob([this._originalBytes], { type: mimeType });
+      if (generation !== this._playbackGeneration) return "";
+      url = URL.createObjectURL(blob);
+    } else if (this._decodedBuffer) {
+      url = await this._renderPlaybackBuffer(this._decodedBuffer, pitchRatio, effect, generation);
     } else {
       return "";
     }
-    if (generation !== this._playbackGeneration) return "";
-    const url = URL.createObjectURL(blob);
+    if (generation !== this._playbackGeneration || !url) return "";
     this._cachedPitchUrl = { ratio: pitchRatio, effectId, url };
     return url;
+  }
+
+  /**
+   * Render one decoded buffer into a WAV blob URL at a pitch and effect. Pitch
+   * shifts without changing duration, so caption positions map 1:1. The input
+   * buffer stays pristine: pitch 1 renders a copy, and a stretch builds a new
+   * buffer. Returns "" when a newer playback generation superseded the render.
+   */
+  private async _renderPlaybackBuffer(
+    decoded: AudioBuffer,
+    pitchRatio: number,
+    effect: Effect | null,
+    generation: number
+  ): Promise<string> {
+    const ctx = this._audioCtx;
+    if (!ctx) return "";
+    let buffer: AudioBuffer;
+    if (pitchRatio === 1.0) {
+      // Copy to avoid mutating the caller's decoded buffer when applying fade-in
+      buffer = new AudioBuffer({
+        length: decoded.length,
+        numberOfChannels: decoded.numberOfChannels,
+        sampleRate: decoded.sampleRate
+      });
+      for (let c = 0; c < decoded.numberOfChannels; c++) {
+        buffer.copyToChannel(decoded.getChannelData(c), c);
+      }
+    } else {
+      // Pitch shift only - duration stays native so caption positions map 1:1.
+      buffer = stretchBuffer(decoded, 1, pitchRatio);
+    }
+    // Fade the speech before the effect: an effect may open with its own onset.
+    applyFadeIn(buffer, 10);
+    if (effect) {
+      buffer = await effect.process(buffer, ctx);
+    }
+    const blob = audioBufferToWavBlob(buffer);
+    if (generation !== this._playbackGeneration) return "";
+    return URL.createObjectURL(blob);
+  }
+
+  /**
+   * Decode, render and encode the fragment behind the playing one while it
+   * plays, so activation at the seam only swaps the blob URL. Fire and forget:
+   * a failure logs one warning and the fragment renders on demand. Never
+   * touches the audio element or the context state, so preparing a fragment
+   * cannot resume a paused reading.
+   */
+  private _maybePrerenderNextFragment(): void {
+    // One prerender at a time. The queue head is the fragment now playing or
+    // activating, so the render target is the one behind it.
+    if (this._prerender) return;
+    const next = this._fragmentQueue.getQueue()[1];
+    if (!next) return;
+    // Only while batch audio runs: never compete with the first fragment's
+    // render (TTFA), and never take main-thread time from a streamed reading's
+    // scheduler while it owns the speakers.
+    if (!this.isPlaying || this.isLoadingAudio || this._streamOwnsSpeakers()) return;
+    const ctx = this._audioCtx;
+    if (!ctx) return;
+    const generation = this._playbackGeneration;
+    const pitch = this.pitch;
+    const effectId = this.activeEffect;
+    const index = next.index;
+    const promise = (async (): Promise<PrerenderedFragment | null> => {
+      try {
+        const binary = atob(next.audioBase64);
+        const arrayBuffer = new ArrayBuffer(binary.length);
+        const bytes = new Uint8Array(arrayBuffer);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
+        if (generation !== this._playbackGeneration) return null;
+        const url = await this._renderPlaybackBuffer(
+          decoded,
+          pitch,
+          getEffect(effectId),
+          generation
+        );
+        if (generation !== this._playbackGeneration || !url) return null;
+        return {
+          index,
+          pitch,
+          effectId,
+          url,
+          durationMs: Math.round(decoded.duration * 1000),
+          bytes: arrayBuffer.slice(0),
+          decoded
+        };
+      } catch (e) {
+        console.warn("[PlaybackStore] fragment prerender failed; renders on demand:", e);
+        return null;
+      }
+    })();
+    this._prerender = { index, generation, promise };
+  }
+
+  /**
+   * Consume the prerendered render for `fragment`, awaiting an in-flight one so
+   * the seam never waits longer than the remaining render. Returns null when
+   * nothing was prepared, a stop superseded it, or the pitch or effect changed
+   * while it waited; those activate through the on-demand path instead.
+   */
+  private async _takePrerenderedFragment(
+    fragment: QueuedFragment
+  ): Promise<PrerenderedFragment | null> {
+    const pre = this._prerender;
+    this._prerender = null;
+    if (!pre || pre.index !== fragment.index) {
+      this._dropPrerender(pre);
+      return null;
+    }
+    const result = await pre.promise;
+    if (!result) return null;
+    if (
+      this._playbackGeneration !== pre.generation ||
+      result.pitch !== this.pitch ||
+      result.effectId !== this.activeEffect
+    ) {
+      URL.revokeObjectURL(result.url);
+      return null;
+    }
+    return result;
+  }
+
+  /** Drop a prerender slot, revoking its URL whenever the render settles. */
+  private _dropPrerender(pre: PendingPrerender | null): void {
+    if (!pre) return;
+    void pre.promise.then((result) => {
+      if (result) URL.revokeObjectURL(result.url);
+    });
+  }
+
+  private _discardPrerender(): void {
+    const pre = this._prerender;
+    this._prerender = null;
+    this._dropPrerender(pre);
   }
 
   async handleAudioReady(base64: string): Promise<void> {
@@ -713,6 +925,8 @@ class PlaybackStore {
     } finally {
       if (generation === this._playbackGeneration) this.isLoadingAudio = false;
     }
+    // While this fragment plays, render the next queued one.
+    this._maybePrerenderNextFragment();
   }
 
   /**
@@ -758,6 +972,8 @@ class PlaybackStore {
     if (!this._fragmentQueue.isProcessing() && !this._streamOwnsSpeakers()) {
       await this._fragmentQueue.startProcessing();
     }
+    // While the current fragment plays, render the one just queued behind it.
+    this._maybePrerenderNextFragment();
   }
 
   /**
@@ -767,6 +983,9 @@ class PlaybackStore {
   private finishPlayback(): void {
     this.stopCaptionClock();
     this._analyser.stop();
+    // Nothing queued remains: drop any prerender left over from skips or a
+    // terminal mid-render.
+    this._discardPrerender();
     // Natural end: the live chain plays its tail click and disposes itself.
     this._finishLiveEffect();
     this.isPlaying = false;
@@ -1058,8 +1277,10 @@ class PlaybackStore {
     // A reading waiting for the other engine is cancelled with this stop.
     this._owner.clearHolds();
 
-    // Clear the fragment queue and any active PCM stream
+    // Clear the fragment queue and any active PCM stream; a stop also discards
+    // the fragment prerendered for this reading.
     this._fragmentQueue.clear();
+    this._discardPrerender();
     // A user stop cuts the live chain immediately; only natural completion gets
     // the tail click and delayed dispose.
     this._disposeLiveEffect();
@@ -1230,6 +1451,8 @@ class PlaybackStore {
         URL.revokeObjectURL(this._cachedPitchUrl.url);
         this._cachedPitchUrl = null;
       }
+      // Prerendered fragments rendered at the old effect: render on demand.
+      this._discardPrerender();
     }
     if (this._audioEl) {
       this._audioEl.volume = volume / 100;
@@ -1514,6 +1737,7 @@ class PlaybackStore {
       URL.revokeObjectURL(this._cachedPitchUrl.url);
       this._cachedPitchUrl = null;
     }
+    this._discardPrerender();
     if (this._audioCtx) {
       void this._audioCtx.close();
       this._audioCtx = null;
