@@ -29,20 +29,17 @@ export class TauriService {
   public async invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
     if (isTauri) {
       try {
-        console.debug(`[TauriService] Invoking: ${cmd}`, args);
+        // IPC payloads and errors can contain credentials. Log command names only.
+        console.debug(`[TauriService] Invoking: ${cmd}`);
         const result = await tauriInvoke<T>(cmd, args);
-        console.debug(`[TauriService] Result for ${cmd}:`, result);
+        console.debug(`[TauriService] Completed: ${cmd}`);
         return result;
       } catch (error) {
-        console.error(`[TauriService] Error invoking ${cmd}:`, error);
+        console.error(`[TauriService] Error invoking: ${cmd}`);
         throw error;
       }
     } else {
-      console.warn(
-        `[TauriService] Tauri API not available (browser mode). Mocking response for: ${cmd}`
-      );
-      // In a real app, you might want to return mock data here or throw a specific error
-      // For now, we'll throw to mimic the behavior of a failed call, or return null if safe
+      console.warn(`[TauriService] Tauri API not available (browser mode). Cannot invoke: ${cmd}`);
       throw new Error(`Tauri API not available. Cannot invoke command: ${cmd}`);
     }
   }

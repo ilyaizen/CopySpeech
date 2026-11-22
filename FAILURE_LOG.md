@@ -205,6 +205,8 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 
 ## Frontend checks
 
+- Log only command names in the shared Tauri wrapper; IPC arguments, results, and errors can contain credentials.
+
 - Import test APIs from `vite-plus/test`, not `vitest`.
 - Hold a mocked async API on a promise the test opens when proving a race. `vi.waitFor` polls and hides the race.
 - Type test catalog maps with `satisfies Record<string, Catalog>`, not a `: Record<…>` annotation.
