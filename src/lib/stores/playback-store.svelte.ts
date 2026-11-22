@@ -14,6 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "svelte-sonner";
 import type { AppConfig, EffectId } from "#lib/types";
 import { effectiveEffect } from "#lib/effects-gate";
+import { isHudEffective } from "#lib/experimental-gates.js";
 import { applyFadeIn, audioBufferToWavBlob, detectAudioMimeType } from "./playback/audio-utils.js";
 import { AudioAnalyser, type EmitPayload } from "./playback/analyser.js";
 import { PcmStreamScheduler, type StreamChunkPayload } from "./playback/pcm-stream.js";
@@ -412,6 +413,9 @@ class PlaybackStore {
   // Wall-clock time of the last caption report for the control server's
   // `GET /status`; the caption clock ticks every 25 ms.
   private _lastCaptionReport = 0;
+  // Mirrors `hud.enabled` (Experimental-gated). While false, no caption frame
+  // crosses to the HUD window; the Play page and `/status` still get every tick.
+  private _hudEnabled = false;
   private _streamCaptions = new Map<
     number,
     {
@@ -578,7 +582,9 @@ class PlaybackStore {
     this._lastCaption = caption;
     this.caption = caption;
     hudStore.handleCaption(caption);
-    void this._emitTo?.("hud", "hud:caption", caption);
+    if (this._hudEnabled) {
+      void this._emitTo?.("hud", "hud:caption", caption);
+    }
     // Report the audible clock to the browser bridge. Best-effort: the bridge
     // may not exist (older app build) or no reading may be active.
     if (this._browserSessionId !== null) {
@@ -1206,6 +1212,11 @@ class PlaybackStore {
     else this.pausePlayback();
   }
 
+  // Mirrors the HUD gate: no `hud:caption` frame crosses to the HUD window while it is off.
+  setHudEnabled(enabled: boolean) {
+    this._hudEnabled = enabled;
+  }
+
   // Keep volume/speed in sync with config (called by synthesize-page via $effect)
   syncPlaybackConfig(volume: number, speed: number, pitch: number, effect: EffectId = "none") {
     this.volume = volume;
@@ -1421,6 +1432,7 @@ class PlaybackStore {
           const { volume } = config.playback;
           const profile = config.tts.profiles.find((p) => p.id === config.tts.active_profile_id);
           const effect = effectiveEffect(config);
+          this._hudEnabled = isHudEffective(config);
           this.syncPlaybackConfig(volume, profile?.speed ?? 1.0, profile?.pitch ?? 1.0, effect);
         } catch (e) {
           console.error("[PlaybackStore] Failed to re-sync after config-changed:", e);

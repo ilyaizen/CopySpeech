@@ -242,6 +242,16 @@ impl CartesiaTtsBackend {
         voice: &str,
     ) -> Result<ChunkStream, TtsError> {
         let api_key = crate::secrets::resolve(&self.config.api_key, &["CARTESIA_API_KEY"]);
+        self.synthesize_streaming_with_key(url, text, voice, api_key)
+    }
+
+    fn synthesize_streaming_with_key(
+        &self,
+        url: &str,
+        text: &str,
+        voice: &str,
+        api_key: String,
+    ) -> Result<ChunkStream, TtsError> {
         if api_key.trim().is_empty() {
             return Err(TtsError::Unavailable("Cartesia API key is missing".into()));
         }
@@ -578,13 +588,12 @@ mod tests {
             wait.recv_timeout(Duration::from_secs(5)).unwrap();
         });
         let backend = CartesiaTtsBackend::new(CartesiaConfig {
-            api_key: "test-key".into(),
             model_id: "test-model".into(),
             ..Default::default()
         });
         assert!(backend.supports_streaming());
         let stream = backend
-            .synthesize_streaming_from(&url, "hello", "requested-voice")
+            .synthesize_streaming_with_key(&url, "hello", "requested-voice", "test-key".into())
             .unwrap();
         assert_eq!(stream.meta.sample_rate, 44100);
         assert_eq!(stream.meta.channels, 1);
@@ -625,12 +634,9 @@ mod tests {
             (401, b"denied".to_vec()),
         ]);
         for status in [200u16, 401] {
-            let backend = CartesiaTtsBackend::new(CartesiaConfig {
-                api_key: "test-key".into(),
-                ..Default::default()
-            });
+            let backend = CartesiaTtsBackend::new(CartesiaConfig::default());
             let stream = backend
-                .synthesize_streaming_from(&server.uri(), "hello", "voice")
+                .synthesize_streaming_with_key(&server.uri(), "hello", "voice", "test-key".into())
                 .unwrap();
             let mut pcm = Vec::new();
             let mut captions = None;

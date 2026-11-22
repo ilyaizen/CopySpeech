@@ -67,6 +67,7 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 - Stop or idle a running `tauri dev` before `cargo check`: its cargo process holds the build-directory lock.
 - Keep the engine-test lock separate from displayed results. Invalidate results after credential replacement or installer changes. Stop cloud engine tests when the environment-key warning defers saving.
 - The app loads secrets from `<exe-dir>/.env` (`src-tauri/target/debug/.env` in dev), not the repo-root `.env`.
+- Give local provider test servers explicit fake credentials; inherited environment keys override config values and can leak in failures.
 - A "called from X" comment is not the call site. Grep the named call site before trusting it.
 - Local engine wrappers speak daemon protocol v2 (`READY 2`) and emit 16-bit signed LE PCM. `pcm-stream.ts` drops any other `bits_per_sample`.
 - Gate every streaming branch on `supports_streaming()` AND `runtime_ready()`. The static claim alone sends a cold daemon's one-shot command down the stream branch.

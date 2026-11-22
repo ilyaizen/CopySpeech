@@ -168,6 +168,15 @@ impl ElevenLabsTtsBackend {
         text: &str,
     ) -> Result<ChunkStream, TtsError> {
         let api_key = crate::secrets::resolve(&self.config.api_key, &["ELEVENLABS_API_KEY"]);
+        self.synthesize_streaming_with_key(base_url, text, api_key)
+    }
+
+    fn synthesize_streaming_with_key(
+        &self,
+        base_url: &str,
+        text: &str,
+        api_key: String,
+    ) -> Result<ChunkStream, TtsError> {
         if api_key.trim().is_empty() {
             log::error!("ElevenLabs stream - API key is missing");
             return Err(TtsError::Unavailable(
@@ -761,9 +770,7 @@ mod tests {
     // ── Streaming (local test HTTP server integration through the real client) ─
 
     fn test_backend() -> ElevenLabsTtsBackend {
-        let mut config = ElevenLabsConfig::default();
-        config.api_key = "test-key".into();
-        ElevenLabsTtsBackend::new(config)
+        ElevenLabsTtsBackend::new(ElevenLabsConfig::default())
     }
 
     fn drain(stream: &ChunkStream) -> Vec<ChunkItem> {
@@ -796,7 +803,11 @@ mod tests {
         let backend = test_backend();
         assert!(backend.supports_streaming());
         let stream = backend
-            .synthesize_streaming_from(&server.uri(), "hello streaming world")
+            .synthesize_streaming_with_key(
+                &server.uri(),
+                "hello streaming world",
+                "test-key".into(),
+            )
             .expect("valid api key must not fail synchronously");
 
         assert_eq!(stream.meta.sample_rate, 24000);
@@ -846,7 +857,7 @@ mod tests {
         let backend = test_backend();
 
         let err_stream = backend
-            .synthesize_streaming_from(&server.uri(), "hello")
+            .synthesize_streaming_with_key(&server.uri(), "hello", "test-key".into())
             .expect("valid api key must not fail synchronously");
         let first = err_stream.recv();
         assert!(
@@ -856,7 +867,7 @@ mod tests {
         assert!(err_stream.recv().is_none());
 
         let empty_stream = backend
-            .synthesize_streaming_from(&server.uri(), "hello")
+            .synthesize_streaming_with_key(&server.uri(), "hello", "test-key".into())
             .expect("valid api key must not fail synchronously");
         assert_eq!(
             empty_stream.recv_timeout(std::time::Duration::from_secs(5)),
@@ -871,7 +882,7 @@ mod tests {
         config.api_key = String::new();
         let backend = ElevenLabsTtsBackend::new(config);
 
-        let result = backend.synthesize_streaming_from(&server.uri(), "hello");
+        let result = backend.synthesize_streaming_with_key(&server.uri(), "hello", String::new());
         assert!(matches!(result, Err(TtsError::Unavailable(_))));
         assert!(
             server.requests().is_empty(),

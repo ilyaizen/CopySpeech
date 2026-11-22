@@ -348,7 +348,15 @@ impl FishTtsBackend {
         base_url: &str,
         text: &str,
     ) -> Result<ChunkStream, TtsError> {
-        let api_key = self.api_key();
+        self.synthesize_streaming_with_key(base_url, text, self.api_key())
+    }
+
+    fn synthesize_streaming_with_key(
+        &self,
+        base_url: &str,
+        text: &str,
+        api_key: String,
+    ) -> Result<ChunkStream, TtsError> {
         if api_key.trim().is_empty() {
             return Err(TtsError::Unavailable(
                 "Fish Audio API key is missing".into(),
@@ -609,12 +617,13 @@ mod tests {
         });
 
         let backend = FishTtsBackend::new(FishConfig {
-            api_key: "test-key".into(),
             model: "s2.1-pro-free".into(),
             ..Default::default()
         });
         assert!(backend.supports_streaming());
-        let stream = backend.synthesize_streaming_from(&url, "hello").unwrap();
+        let stream = backend
+            .synthesize_streaming_with_key(&url, "hello", "test-key".into())
+            .unwrap();
         assert_eq!(stream.meta.sample_rate, 44100);
         assert_eq!(stream.meta.channels, 1);
         assert_eq!(stream.meta.bits_per_sample, 16);

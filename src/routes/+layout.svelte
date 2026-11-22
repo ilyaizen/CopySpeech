@@ -1,5 +1,6 @@
 <script lang="ts">
   import { effectiveEffect } from "#lib/effects-gate";
+  import { isHudEffective } from "#lib/experimental-gates.js";
   import { onMount, onDestroy, setContext } from "svelte";
   import { afterNavigate, goto } from "$app/navigation";
   import Lenis from "lenis";
@@ -179,6 +180,7 @@
       const speed = activeProfile?.speed ?? 1.0;
       const pitchVal = activeProfile?.pitch ?? 1.0;
       playbackStore.syncPlaybackConfig(volume, speed, pitchVal, activeEffect);
+      playbackStore.setHudEnabled(isHudEffective(config));
     } catch (e) {
       console.error("Failed to sync appearance/locale:", e);
     }
