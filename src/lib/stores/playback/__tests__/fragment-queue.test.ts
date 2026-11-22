@@ -132,6 +132,21 @@ describe("FragmentQueue", () => {
     expect(isCompleted()).toBe(true);
   });
 
+  it("completes a queue waiting for a fragment once its own reading is fully synthesized", async () => {
+    const { queue, isCompleted } = createQueue();
+    queue.enqueue({ ...fragment(0), readingId: 41 });
+    await queue.startProcessing();
+    queue.handleFragmentEnded();
+    expect(queue.isWaitingForNext()).toBe(true);
+
+    queue.markReadingComplete(42);
+    expect(isCompleted()).toBe(false);
+
+    queue.markReadingComplete(41);
+    expect(queue.isWaitingForNext()).toBe(false);
+    expect(isCompleted()).toBe(true);
+  });
+
   it("supports full replay of all received fragments", async () => {
     const { queue, played, isCompleted } = createQueue();
     const total = 2;

@@ -837,6 +837,8 @@ class PlaybackStore {
    */
   private handlePaginationComplete(payload: PaginationCompletePayload | null): void {
     this._owner.complete(this._eventReadingId(payload?.reading_id));
+    // A batch reading's queue waits for fragments that synthesis has already finished sending.
+    this._fragmentQueue.markReadingComplete(payload?.reading_id ?? null);
   }
 
   /** Hand a naturally finished live chain its tail and let it self-dispose. */

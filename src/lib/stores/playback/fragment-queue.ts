@@ -128,6 +128,16 @@ export class FragmentQueue {
   }
 
   /**
+   * The backend finished synthesizing `readingId`, so no fragment of it will arrive. Releases a
+   * queue waiting for one. Another reading's completion changes nothing.
+   */
+  markReadingComplete(readingId: number | null): void {
+    const current = this._allFragments[0]?.readingId ?? null;
+    if (current !== readingId) return;
+    this.markTerminal();
+  }
+
+  /**
    * Check if all fragments for this reading have been received and can be replayed
    */
   canReplay(): boolean {
