@@ -86,14 +86,16 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// The common case: no reading in flight, so the turn is free and nothing
-    /// asks for a flush.
     #[tokio::test]
-    async fn a_free_turn_is_taken_at_once_without_a_flush_request() {
+    async fn uncontended_and_sequential_turns_do_not_request_flush() {
         let gate = QueuedGate::new();
-        let turn = gate.acquire().await;
+        let first = gate.acquire().await;
         assert!(!gate.flush_requested());
-        drop(turn);
+        drop(first);
+
+        let second = gate.acquire().await;
+        assert!(!gate.flush_requested());
+        drop(second);
     }
 
     /// A reading that arrives during another asks the holder to flush and waits
@@ -125,16 +127,5 @@ mod tests {
             !waiter.await.unwrap(),
             "the new holder must gate normally again"
         );
-    }
-
-    /// After a reading releases the turn, the next one takes it without a flush
-    /// request left over.
-    #[tokio::test]
-    async fn the_turn_passes_to_the_next_reading_without_a_flush_request() {
-        let gate = QueuedGate::new();
-        drop(gate.acquire().await);
-        let second = gate.acquire().await;
-        assert!(!gate.flush_requested());
-        drop(second);
     }
 }

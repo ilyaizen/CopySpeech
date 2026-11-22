@@ -17,9 +17,6 @@ describe("syncSaveBarOrAutoSave", () => {
   function makeSave() {
     let save = 0;
     return {
-      bump: () => {
-        save += 1;
-      },
       read: () => save,
       onSave: async () => {
         save += 1;

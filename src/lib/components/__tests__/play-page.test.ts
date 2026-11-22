@@ -1,4 +1,6 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vite-plus/test";
+// @vitest-environment jsdom
+
+import { describe, expect, it, vi, beforeAll, beforeEach, afterEach } from "vite-plus/test";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { waitForI18nReady } from "#lib/i18n";
@@ -10,9 +12,6 @@ import { playbackStore } from "#lib/stores/playback-store.svelte";
 import { testConfig } from "#lib/test-fixtures/app-config";
 import type { AppConfig } from "#lib/types";
 
-// QuickSettings' emote-tag probe invokes through this service; it only feeds
-// the post-process row's disabled state, which these tests never open. A plain
-// function survives clearAllMocks/restoreAllMocks between tests.
 vi.mock("#lib/services/tauri.js", () => ({
   isTauri: true,
   invoke: async () => false
@@ -53,9 +52,12 @@ vi.mock("#lib/stores/playback-store.svelte", () => ({
   }
 }));
 
+beforeAll(async () => {
+  await waitForI18nReady();
+});
+
 describe("play-page history gating", () => {
-  beforeEach(async () => {
-    await waitForI18nReady();
+  beforeEach(() => {
     vi.clearAllMocks();
   });
 
@@ -63,66 +65,38 @@ describe("play-page history gating", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders RecentHistory only when experimental and history are both enabled", async () => {
-    const config = testConfig();
-    config.general.experimental_enabled = true;
-    config.history.enabled = true;
-    vi.mocked(invoke).mockImplementation(async (cmd) => {
-      if (cmd === "get_config") return config;
-      return undefined;
-    });
+  it("wires RecentHistory visibility and loadHistory through isHistoryEffective", async () => {
+    const gated = testConfig();
+    gated.general.experimental_enabled = false;
+    gated.history.enabled = true;
+    vi.mocked(invoke).mockImplementation(async (cmd) => (cmd === "get_config" ? gated : undefined));
 
-    const view = render(PlayPage);
-
+    const hiddenView = render(PlayPage);
     await waitFor(() => {
-      expect(view.queryByRole("region", { name: /Recent History/i })).not.toBeNull();
+      expect(hiddenView.queryByRole("textbox")).not.toBeNull();
+    });
+    expect(hiddenView.queryByRole("region", { name: /Recent History/i })).toBeNull();
+    expect(historyStore.loadHistory).not.toHaveBeenCalled();
+    hiddenView.unmount();
+
+    const enabled = testConfig();
+    enabled.general.experimental_enabled = true;
+    enabled.history.enabled = true;
+    vi.mocked(invoke).mockImplementation(async (cmd) =>
+      cmd === "get_config" ? enabled : undefined
+    );
+
+    const visibleView = render(PlayPage);
+    await waitFor(() => {
+      expect(visibleView.queryByRole("region", { name: /Recent History/i })).not.toBeNull();
     });
     expect(historyStore.loadHistory).toHaveBeenCalled();
-    view.unmount();
-  });
-
-  it("hides RecentHistory and skips loadHistory when experimental is off", async () => {
-    const config = testConfig();
-    config.general.experimental_enabled = false;
-    config.history.enabled = true;
-    vi.mocked(invoke).mockImplementation(async (cmd) => {
-      if (cmd === "get_config") return config;
-      return undefined;
-    });
-
-    const view = render(PlayPage);
-
-    await waitFor(() => {
-      expect(view.queryByRole("textbox")).not.toBeNull();
-    });
-    expect(view.queryByRole("region", { name: /Recent History/i })).toBeNull();
-    expect(historyStore.loadHistory).not.toHaveBeenCalled();
-    view.unmount();
-  });
-
-  it("hides RecentHistory when history is disabled", async () => {
-    const config = testConfig();
-    config.general.experimental_enabled = true;
-    config.history.enabled = false;
-    vi.mocked(invoke).mockImplementation(async (cmd) => {
-      if (cmd === "get_config") return config;
-      return undefined;
-    });
-
-    const view = render(PlayPage);
-
-    await waitFor(() => {
-      expect(view.queryByRole("textbox")).not.toBeNull();
-    });
-    expect(view.queryByRole("region", { name: /Recent History/i })).toBeNull();
-    expect(historyStore.loadHistory).not.toHaveBeenCalled();
-    view.unmount();
+    visibleView.unmount();
   });
 });
 
 describe("play-page error dismissal", () => {
   it("dismisses a speak failure from its error box", async () => {
-    await waitForI18nReady();
     vi.clearAllMocks();
     vi.mocked(invoke).mockImplementation(async (cmd) => {
       if (cmd === "get_config") return testConfig();
@@ -148,7 +122,6 @@ describe("play-page error dismissal", () => {
 
 describe("play-page stop", () => {
   it("aborts queued synthesis even when synthesis has not started", async () => {
-    await waitForI18nReady();
     vi.clearAllMocks();
     playbackStore.isPlaying = true;
     playbackStore.isSynthesizing = false;
@@ -174,8 +147,7 @@ describe("play-page config save pipeline", () => {
   const scrollIntoView = vi.fn();
   let configChanged: ((event: Event<unknown>) => void) | null = null;
 
-  beforeEach(async () => {
-    await waitForI18nReady();
+  beforeEach(() => {
     vi.clearAllMocks();
     configChanged = null;
     vi.mocked(listen).mockImplementation(async (event, handler) => {
@@ -204,9 +176,6 @@ describe("play-page config save pipeline", () => {
     const config = testConfig();
     config.general.experimental_enabled = true;
     config.general.effects_enabled = true;
-    // The quick-settings edits below go through the effects switch: unlike the
-    // hotkey switch it stays mounted across toggles, and it needs an active
-    // profile to be clickable.
     config.tts.profiles = [
       {
         id: "default",
@@ -239,8 +208,6 @@ describe("play-page config save pipeline", () => {
     release: () => void;
   }
 
-  // Records every invoke in order and can park the first set_config in flight
-  // on a gate only the test opens, so ordering is proven, not polled.
   function mockSaveBackend(options: SaveBackendOptions): SaveBackend {
     const saved: AppConfig[] = [];
     const cmdLog: string[] = [];
@@ -276,9 +243,6 @@ describe("play-page config save pipeline", () => {
     };
   }
 
-  // Fake timers are enabled before mount so every debounce the page arms is
-  // fake and no real timer can fire mid-test; the async mount chain is drained
-  // by advancing the fake clock.
   async function mountPlay() {
     vi.useFakeTimers();
     const view = render(PlayPage);
@@ -306,12 +270,12 @@ describe("play-page config save pipeline", () => {
     const backend = mockSaveBackend({ getConfig: () => config });
     const view = await mountPlay();
 
-    await fireEvent.click(effectsSwitch(view)); // quick-settings edit
+    await fireEvent.click(effectsSwitch(view));
     await fireEvent.input(view.getByRole("textbox"), { target: { value: "hello" } });
     await fireEvent.click(view.getByRole("button", { name: "Play" }));
     await vi.advanceTimersByTimeAsync(1);
 
-    expect(backend.saved).toHaveLength(1); // the debounce never fired; flush wrote exactly once
+    expect(backend.saved).toHaveLength(1);
     expect(backend.saved[0].tts.profiles[0].effects.enabled).toBe(true);
     expect(backend.cmdLog.indexOf("set_config")).toBeLessThan(backend.cmdLog.indexOf("speak_now"));
     expect(invoke).toHaveBeenCalledWith("speak_now", { text: "hello" });
@@ -324,14 +288,14 @@ describe("play-page config save pipeline", () => {
     const backend = mockSaveBackend({ getConfig: () => config, holdFirstSave: true });
     const view = await mountPlay();
 
-    await fireEvent.click(effectsSwitch(view)); // edit A: effects on
-    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS); // save A starts, held in flight
+    await fireEvent.click(effectsSwitch(view));
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
     expect(backend.inFlight()).toBe(1);
     expect(backend.saved).toHaveLength(0);
 
-    await fireEvent.click(effectsSwitch(view)); // edit B while save A is in flight
-    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS); // B's debounce fires behind A
-    expect(backend.inFlight()).toBe(1); // still only A
+    await fireEvent.click(effectsSwitch(view));
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
+    expect(backend.inFlight()).toBe(1);
     expect(backend.saved).toHaveLength(0);
 
     backend.release();
@@ -340,7 +304,7 @@ describe("play-page config save pipeline", () => {
     expect(backend.saved).toHaveLength(2);
     expect(backend.maxConcurrent()).toBe(1);
     expect(backend.saved[0].tts.profiles[0].effects.enabled).toBe(true);
-    expect(backend.saved[1].tts.profiles[0].effects.enabled).toBe(false); // the mid-flight edit, not a stale snapshot
+    expect(backend.saved[1].tts.profiles[0].effects.enabled).toBe(false);
     view.unmount();
   });
 
@@ -349,17 +313,17 @@ describe("play-page config save pipeline", () => {
     const backend = mockSaveBackend({ getConfig: () => config, holdFirstSave: true });
     const view = await mountPlay();
 
-    await fireEvent.click(effectsSwitch(view)); // effects on
-    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS); // save 1 in flight
-    await fireEvent.click(effectsSwitch(view)); // effects off, debounce re-armed
+    await fireEvent.click(effectsSwitch(view));
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
+    await fireEvent.click(effectsSwitch(view));
     await fireEvent.input(view.getByRole("textbox"), { target: { value: "hello" } });
-    await fireEvent.click(view.getByRole("button", { name: "Play" })); // beats the debounce
-    expect(backend.saved).toHaveLength(0); // flush is parked behind the in-flight write
+    await fireEvent.click(view.getByRole("button", { name: "Play" }));
+    expect(backend.saved).toHaveLength(0);
 
     backend.release();
     await vi.advanceTimersByTimeAsync(1);
 
-    expect(backend.saved).toHaveLength(2); // save 1, then the edit — no duplicate write
+    expect(backend.saved).toHaveLength(2);
     expect(backend.maxConcurrent()).toBe(1);
     expect(backend.saved[1].tts.profiles[0].effects.enabled).toBe(false);
     expect(backend.cmdLog.indexOf("set_config")).toBeLessThan(backend.cmdLog.indexOf("speak_now"));
@@ -381,8 +345,8 @@ describe("play-page config save pipeline", () => {
 
     expect(view.queryByText(/Failed to save settings/)).not.toBeNull();
     expect(view.getByText(/disk full/)).not.toBeNull();
-    expect(backend.cmdLog).not.toContain("speak_now"); // the failure blocked synthesis
-    expect(backend.cmdLog).toContain("set_config"); // and the write was attempted
+    expect(backend.cmdLog).not.toContain("speak_now");
+    expect(backend.cmdLog).toContain("set_config");
 
     failing.current = false;
     await fireEvent.click(view.getByRole("button", { name: "Play" }));
@@ -398,25 +362,22 @@ describe("play-page config save pipeline", () => {
     const backend = mockSaveBackend({ getConfig: () => structuredClone(serverState) });
     const view = await mountPlay();
 
-    await fireEvent.click(effectsSwitch(view)); // unsaved local edit, debounce pending
-    serverState.playback.volume = 7; // another window saved its own change
+    await fireEvent.click(effectsSwitch(view));
+    serverState.playback.volume = 7;
     await fireConfigChanged();
-    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS); // the edit's debounce fires
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
 
     expect(backend.saved).toHaveLength(1);
-    expect(backend.saved[0].tts.profiles[0].effects.enabled).toBe(true); // the edit survived the broadcast
-    expect(backend.saved[0].playback.volume).toBe(100); // not the broadcast's value
+    expect(backend.saved[0].tts.profiles[0].effects.enabled).toBe(true);
+    expect(backend.saved[0].playback.volume).toBe(100);
     expect(effectsSwitch(view).getAttribute("aria-checked")).toBe("true");
 
-    // With no unsaved edits, a broadcast must re-sync the page instead. The
-    // server still has effects off — the edit was local-only — so the
-    // broadcast flips the switch back.
     serverState.playback.volume = 55;
     await fireConfigChanged();
     await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
 
     expect(effectsSwitch(view).getAttribute("aria-checked")).toBe("false");
-    expect(backend.saved).toHaveLength(1); // the re-sync never wrote back
+    expect(backend.saved).toHaveLength(1);
     view.unmount();
   });
 });

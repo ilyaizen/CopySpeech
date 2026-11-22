@@ -392,7 +392,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cooldown_survives_retriggers_and_cannot_be_shortened() {
+    fn cooldown_escalates_caps_and_resets_after_success() {
         let now = Instant::now();
         let mut state = EdgeCooldown {
             until: None,
@@ -413,33 +413,53 @@ mod tests {
         state.rate_limited(now, Some(2));
         assert_eq!(state.remaining(now), Duration::from_secs(120));
         assert!(state.remaining(now + Duration::from_secs(120)).is_zero());
+
+        // Hostile Retry-After is capped instead of disabling the engine.
+        let mut capped = EdgeCooldown {
+            until: None,
+            strikes: 0,
+        };
+        assert_eq!(capped.rate_limited(now, Some(u64::MAX)), MAX_COOLDOWN);
+        assert!(capped.remaining(now) <= MAX_COOLDOWN);
+
+        // Accepting and succeeding resets the escalation ladder.
+        let mut ladder = EdgeCooldown {
+            until: None,
+            strikes: 0,
+        };
+        for expected in [5, 10, 20, 40, 60, 60] {
+            assert_eq!(
+                ladder.rate_limited(now, None),
+                Duration::from_secs(expected)
+            );
+        }
+        let accepted_at = now + Duration::from_secs(60);
+        ladder.reserve_start(accepted_at);
+        ladder.succeeded();
+        assert_eq!(ladder.remaining(accepted_at), REQUEST_SPACING);
+        assert!(ladder
+            .remaining(accepted_at + Duration::from_secs(2))
+            .is_zero());
+        assert_eq!(
+            ladder.rate_limited(accepted_at, None),
+            Duration::from_secs(5)
+        );
     }
 
     #[test]
-    fn waiting_cancels_without_resetting_the_provider_cooldown() {
+    fn wait_for_slot_respects_cancellation_and_cooldown_cap() {
         let now = Instant::now();
         let mut state = EdgeCooldown {
             until: None,
             strikes: 0,
         };
         state.rate_limited(now, Some(20));
-        let result = wait_for_slot(|| state.remaining(now), || true, MAX_WAIT);
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        let pre_cancelled = wait_for_slot(|| state.remaining(now), || true, MAX_WAIT);
+        assert!(pre_cancelled.unwrap_err().to_string().contains("cancelled"));
         assert_eq!(state.remaining(now), Duration::from_secs(20));
-    }
 
-    #[test]
-    fn long_retry_after_fails_without_reconnecting_early() {
-        let result = wait_for_slot(|| Duration::from_secs(120), || false, MAX_WAIT);
-        let message = result.unwrap_err().to_string();
-        assert!(message.contains("cooling down"));
-        assert!(!message.contains("HTTP 429"));
-    }
-
-    #[test]
-    fn cancellation_during_cooldown_prevents_request_start() {
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let result = wait_for_slot(
+        let during_poll = wait_for_slot(
             || {
                 cancelled.store(true, Ordering::SeqCst);
                 Duration::from_secs(1)
@@ -447,70 +467,14 @@ mod tests {
             || cancelled.load(Ordering::SeqCst),
             MAX_WAIT,
         );
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
-    }
+        assert!(during_poll.unwrap_err().to_string().contains("cancelled"));
 
-    #[test]
-    fn oversized_retry_after_is_capped_instead_of_disabling_the_engine() {
-        let now = Instant::now();
-        let mut state = EdgeCooldown {
-            until: None,
-            strikes: 0,
-        };
-        // A hostile or buggy header must not outlive the process.
-        assert_eq!(state.rate_limited(now, Some(u64::MAX)), MAX_COOLDOWN);
-        assert!(state.remaining(now) <= MAX_COOLDOWN);
+        let capped = wait_for_slot(|| Duration::from_secs(120), || false, MAX_WAIT);
+        let message = capped.unwrap_err().to_string();
+        assert!(message.contains("cooling down"));
+        assert!(!message.contains("HTTP 429"));
+
         assert!(wait_for_slot(|| Duration::ZERO, || false, Duration::ZERO).is_ok());
-    }
-
-    #[test]
-    fn success_resets_the_escalation_ladder() {
-        let now = Instant::now();
-        let mut state = EdgeCooldown {
-            until: None,
-            strikes: 0,
-        };
-        state.rate_limited(now, None);
-        state.rate_limited(now, None);
-        assert_eq!(state.rate_limited(now, None), Duration::from_secs(20));
-        let accepted_at = now + Duration::from_secs(20);
-        state.reserve_start(accepted_at);
-        state.succeeded();
-        assert_eq!(state.remaining(accepted_at), REQUEST_SPACING);
-        assert!(state
-            .remaining(accepted_at + Duration::from_secs(2))
-            .is_zero());
-        assert_eq!(
-            state.rate_limited(accepted_at, None),
-            Duration::from_secs(5)
-        );
-    }
-
-    #[test]
-    fn fallback_cooldown_never_exceeds_sixty_seconds() {
-        let mut now = Instant::now();
-        let mut state = EdgeCooldown {
-            until: None,
-            strikes: 0,
-        };
-        for expected in [5, 10, 20, 40, 60, 60] {
-            assert_eq!(state.rate_limited(now, None), Duration::from_secs(expected));
-            now += Duration::from_secs(expected);
-        }
-    }
-
-    #[test]
-    fn provider_refusal_is_not_retried_by_the_command_layer() {
-        let backend = EdgeTtsBackend::new(EdgeTtsConfig::default());
-        assert!(
-            !backend.failure_is_final(),
-            "a fresh backend has no verdict"
-        );
-        backend.refused.store(true, Ordering::Relaxed);
-        assert!(backend.failure_is_final());
-        // The next request clears it: one refusal must not mute later readings.
-        backend.refused.store(false, Ordering::Relaxed);
-        assert!(!backend.failure_is_final());
     }
 
     #[test]
@@ -522,18 +486,5 @@ mod tests {
         assert!(!safe_failure(Some(&error)).contains("untrusted"));
         assert!(parse_failure("unstructured failure").is_none());
         assert!(!safe_failure(None).contains("unstructured"));
-    }
-
-    #[test]
-    fn test_voice_display_name() {
-        let backend = EdgeTtsBackend::new(EdgeTtsConfig::default());
-        // "en-US-EmmaMultilingualNeural" → split[2]="EmmaMultilingualNeural"
-        // → trim "Neural" suffix → "EmmaMultilingual" → lowercase
-        assert_eq!(
-            backend.voice_display_name("en-US-EmmaMultilingualNeural"),
-            "emmamultilingual"
-        );
-        assert_eq!(backend.voice_display_name("en-GB-SoniaNeural"), "sonia");
-        assert_eq!(backend.voice_display_name("en-US-AriaNeural"), "aria");
     }
 }

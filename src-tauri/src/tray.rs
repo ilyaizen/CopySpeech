@@ -278,15 +278,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hidden_start_requires_a_saved_config_and_a_working_tray() {
+    fn tray_availability_gates_hidden_start_and_close_to_tray() {
         assert!(should_start_hidden(true, true, true));
         assert!(!should_start_hidden(false, true, true));
         assert!(!should_start_hidden(true, false, true));
         assert!(!should_start_hidden(true, true, false));
-    }
 
-    #[test]
-    fn closing_without_a_tray_exits_instead_of_stranding_the_app() {
         assert!(should_close_to_tray(true, true));
         assert!(!should_close_to_tray(true, false));
         assert!(!should_close_to_tray(false, true));

@@ -1,14 +1,11 @@
-import { describe, expect, test } from "vite-plus/test";
+import { expect, test } from "vite-plus/test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-// The row contract: every SettingRow carries a tooltip. Descriptions live in
-// the tooltip, never in a <p> under the row, so the sidebar layout reads
-// clean and the info is one hover away everywhere.
-// This file lives in settings/__tests__/, so the source folder is one level up.
-// Fail loudly if that folder yields no components: an empty list would
-// generate zero tests and pass silently.
+// Every SettingRow in Settings puts its description in `tooltip=`, never in a <p>
+// below the row. Fail loudly if the settings directory yields no components.
 const SETTINGS_DIR = join(import.meta.dirname, "..");
+const SETTINGS_PAGE = join(import.meta.dirname, "../..", "settings-page.svelte");
 
 function settingComponentPaths(): string[] {
   const paths = readdirSync(SETTINGS_DIR)
@@ -19,13 +16,12 @@ function settingComponentPaths(): string[] {
       `No .svelte components found in ${SETTINGS_DIR}; the tooltip contract would test nothing`
     );
   }
-  return paths;
+  return [...paths, SETTINGS_PAGE];
 }
 
 function settingRowsWithoutTooltip(source: string): string[] {
   const rows: string[] = [];
-  const pattern = /<SettingRow\b/g;
-  for (const match of source.matchAll(pattern)) {
+  for (const match of source.matchAll(/<SettingRow\b/g)) {
     const start = match.index;
     // Scan to the tag's closing '>' while ignoring '>' inside {...} expressions.
     let depth = 0;
@@ -42,11 +38,14 @@ function settingRowsWithoutTooltip(source: string): string[] {
   return rows.filter((row) => !row.includes("tooltip="));
 }
 
-describe("SettingRow tooltip contract", () => {
+test("every SettingRow across settings components carries a tooltip", () => {
+  const missing: Array<{ file: string; row: string }> = [];
   for (const path of settingComponentPaths()) {
-    test(`${path.split(/[\\/]/).pop()} puts a tooltip on every SettingRow`, () => {
-      const source = readFileSync(path, "utf-8");
-      expect(settingRowsWithoutTooltip(source)).toEqual([]);
-    });
+    const source = readFileSync(path, "utf-8");
+    const file = path.split(/[\\/]/).pop() ?? path;
+    for (const row of settingRowsWithoutTooltip(source)) {
+      missing.push({ file, row });
+    }
   }
+  expect(missing).toEqual([]);
 });

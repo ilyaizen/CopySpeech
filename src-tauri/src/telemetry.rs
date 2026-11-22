@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_timing_stats_ema() {
+    fn test_timing_stats_ema_and_estimate() {
         let mut stats = TimingStats::default();
         stats.add_sample(1000, 500);
         assert_eq!(stats.sample_count, 1);
@@ -353,22 +353,14 @@ mod tests {
 
         stats.add_sample(2000, 500);
         assert_eq!(stats.sample_count, 2);
-        assert!(stats.ema_duration_ms < 2000.0);
-        assert!(stats.ema_duration_ms > 1000.0);
-    }
+        assert!(stats.ema_duration_ms < 2000.0 && stats.ema_duration_ms > 1000.0);
 
-    #[test]
-    fn test_estimate() {
         let mut log = TelemetryLog::new();
-
-        let (est, conf) = log.estimate("Local", "voice1", 500);
-        assert!(est.is_none());
-        assert_eq!(conf, 0.0);
+        assert_eq!(log.estimate("Local", "voice1", 500), (None, 0.0));
 
         log.record("Local", "voice1", 500, 1000);
         let (est, conf) = log.estimate("Local", "voice1", 500);
-        assert!(est.is_some());
-        assert!(conf < 1.0);
+        assert!(est.is_some() && conf < 1.0);
 
         for i in 0..20 {
             log.record("Local", "voice1", 500, 1000 + i * 10);

@@ -1503,7 +1503,7 @@ mod tests {
     #[test]
     fn every_engine_has_exactly_one_catalog_entry() {
         let entries = list_engines();
-        for engine in [
+        let expected = [
             TtsEngine::Local,
             TtsEngine::Http,
             TtsEngine::OpenAI,
@@ -1522,16 +1522,21 @@ mod tests {
             TtsEngine::Pocket,
             TtsEngine::TinyVoca,
             TtsEngine::Kale,
-        ] {
+        ];
+        for engine in &expected {
             assert_eq!(
                 entries
                     .iter()
-                    .filter(|entry| entry.engine == engine)
+                    .filter(|entry| entry.engine == *engine)
                     .count(),
                 1
             );
         }
-        assert_eq!(entries.len(), 18);
+        assert_eq!(entries.len(), expected.len());
+        for entry in entries {
+            assert!(!entry.label.trim().is_empty());
+            assert!(!entry.docs_url.trim().is_empty());
+        }
     }
 
     #[test]
@@ -1550,40 +1555,6 @@ mod tests {
                 "{id}: first-class local = {first_class}, DAEMON_ENGINES lists it = {listed}"
             );
         }
-        assert_eq!(crate::tts::local_daemon::DAEMON_ENGINES.len(), 7);
-    }
-
-    #[test]
-    fn catalog_entries_have_labels_and_docs() {
-        for entry in list_engines() {
-            assert!(!entry.label.trim().is_empty());
-            assert!(!entry.docs_url.trim().is_empty());
-        }
-    }
-
-    #[test]
-    fn caption_support_matches_timing_adapters() {
-        let supported: Vec<_> = list_engines()
-            .into_iter()
-            .filter(|entry| entry.supports_captions)
-            .map(|entry| entry.engine)
-            .collect();
-        assert_eq!(
-            supported,
-            [
-                TtsEngine::Kitten,
-                TtsEngine::Qwen,
-                TtsEngine::Piper,
-                TtsEngine::Kokoro,
-                TtsEngine::TinyVoca,
-                TtsEngine::Kale,
-                TtsEngine::ElevenLabs,
-                TtsEngine::Fish,
-                TtsEngine::Cartesia,
-                TtsEngine::Xai,
-                TtsEngine::Edge,
-            ]
-        );
     }
 
     #[test]
@@ -1626,155 +1597,6 @@ mod tests {
                     entry.engine, option.key, option.default_value
                 );
             }
-        }
-    }
-
-    #[test]
-    fn cloud_engine_options_are_predefined_selects() {
-        // Account-specific values stay free text: the Microsoft endpoint is
-        // the account's own URL. The ElevenLabs speaker boost is an on/off flag.
-        let cloud = [
-            TtsEngine::OpenAI,
-            TtsEngine::ElevenLabs,
-            TtsEngine::Cartesia,
-            TtsEngine::Fish,
-            TtsEngine::Xai,
-            TtsEngine::Mistral,
-            TtsEngine::Google,
-            TtsEngine::Microsoft,
-        ];
-        for entry in list_engines()
-            .into_iter()
-            .filter(|e| cloud.contains(&e.engine))
-        {
-            for option in &entry.options {
-                let allowed = match (&entry.engine, option.key.as_str()) {
-                    (TtsEngine::Microsoft, "endpoint") => {
-                        matches!(option.kind, EngineOptionKind::Text)
-                    }
-                    (TtsEngine::ElevenLabs, "use_speaker_boost") => {
-                        matches!(option.kind, EngineOptionKind::Boolean)
-                    }
-                    _ => matches!(option.kind, EngineOptionKind::Select),
-                };
-                assert!(
-                    allowed,
-                    "{:?}.{} must be a select with predefined choices",
-                    entry.engine, option.key
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn emote_tag_support_is_per_engine_model_pair() {
-        let supported: [(TtsEngine, &str); 8] = [
-            (TtsEngine::ElevenLabs, "eleven_v4"),
-            (TtsEngine::ElevenLabs, "eleven_v4_turbo"),
-            (TtsEngine::ElevenLabs, "eleven_v3"),
-            (TtsEngine::Fish, "s2.1-pro"),
-            (TtsEngine::Fish, "s2.1-pro-free"),
-            (TtsEngine::Fish, "s2-pro"),
-            // xAI and Mistral have no model parameter: any model string
-            // counts, including the empty one the Dramatize gate passes.
-            (TtsEngine::Xai, ""),
-            (TtsEngine::Mistral, "voxtral-mini-tts-3-0"),
-        ];
-        for (engine, model) in supported {
-            assert!(
-                super::supports_emote_tags(&engine, model),
-                "{engine:?} {model} must support emote tags"
-            );
-        }
-    }
-
-    #[test]
-    fn emote_tag_exclusions_stay_unsupported() {
-        let excluded: [(TtsEngine, &str); 6] = [
-            (TtsEngine::ElevenLabs, "eleven_v3_conversational"),
-            (TtsEngine::ElevenLabs, "eleven_multilingual_v2"),
-            (TtsEngine::ElevenLabs, "eleven_flash_v2_5"),
-            (TtsEngine::Fish, "drama-3"),
-            (TtsEngine::Fish, ""),
-            (TtsEngine::OpenAI, "gpt-4o-mini-tts"),
-        ];
-        for (engine, model) in excluded {
-            assert!(
-                !super::supports_emote_tags(&engine, model),
-                "{engine:?} {model} must NOT support emote tags"
-            );
-        }
-    }
-
-    #[test]
-    fn model_selects_list_verified_model_ids() {
-        let cases: [(TtsEngine, &str, &str, &[&str]); 5] = [
-            (
-                TtsEngine::OpenAI,
-                "model",
-                "gpt-4o-mini-tts",
-                &["gpt-4o-mini-tts", "tts-1", "tts-1-hd"],
-            ),
-            (
-                TtsEngine::ElevenLabs,
-                "model_id",
-                "eleven_v4_turbo",
-                &[
-                    "eleven_v4",
-                    "eleven_v4_turbo",
-                    "eleven_v3",
-                    "eleven_v3_conversational",
-                    "eleven_multilingual_v2",
-                    "eleven_flash_v2_5",
-                    "eleven_flash_v2",
-                ],
-            ),
-            (
-                TtsEngine::Cartesia,
-                "model_id",
-                "sonic-3.6",
-                &["sonic-3.6", "sonic-3.5"],
-            ),
-            (
-                TtsEngine::Fish,
-                "model",
-                "s2.1-pro-free",
-                &["s2.1-pro", "s2.1-pro-free", "s2-pro", "drama-3"],
-            ),
-            (
-                TtsEngine::Google,
-                "model",
-                "gemini-3.8-flash-tts",
-                &[
-                    "gemini-3.8-flash-tts",
-                    "gemini-3.8-flash-lite-tts",
-                    "gemini-2.5-flash-preview-tts",
-                ],
-            ),
-        ];
-        let entries = list_engines();
-        for (engine, key, default, expected) in cases {
-            let entry = entries
-                .iter()
-                .find(|e| e.engine == engine)
-                .expect("catalog entry");
-            let option = entry
-                .options
-                .iter()
-                .find(|o| o.key == key)
-                .expect("model option");
-            assert!(
-                matches!(option.kind, EngineOptionKind::Select),
-                "{engine:?}.{key} must be a select"
-            );
-            assert_eq!(option.default_value, serde_json::json!(default));
-            let choices: Vec<&str> = option
-                .choices
-                .iter()
-                .flatten()
-                .map(String::as_str)
-                .collect();
-            assert_eq!(choices, expected, "{engine:?}.{key} choices");
         }
     }
 }

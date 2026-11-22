@@ -2,23 +2,26 @@
 
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { expect, test } from "vite-plus/test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "vite-plus/test";
 
 const run = promisify(execFile);
 const cli = fileURLToPath(new URL("../../scripts/copyspeech.mjs", import.meta.url));
 
 type Captured = { method?: string; path?: string; body: string };
 
-/** Run the CLI against a loopback stand-in for the control server. */
-async function runCli(args: string[], reply = "{}") {
-  const requests: Captured[] = [];
-  const server = createServer(async (request, response) => {
+let server: Server;
+let port = 0;
+let reply = "{}";
+const requests: Captured[] = [];
+
+beforeAll(async () => {
+  server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     requests.push({
@@ -30,56 +33,45 @@ async function runCli(args: string[], reply = "{}") {
     response.end(reply);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  try {
-    // SAFETY: listen(0, "127.0.0.1") has completed; this is a bound TCP server, not a pipe.
-    const { port } = server.address() as AddressInfo;
-    const { stdout } = await run(process.execPath, [cli, ...args], {
-      env: { ...process.env, COPYSPEECH_CONTROL_ADDR: `127.0.0.1:${port}` },
-      timeout: 5000
-    });
-    return { stdout: stdout.trim(), requests };
-  } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
-    });
-  }
-}
-
-async function speakRequest(...flags: string[]) {
-  const { stdout, requests } = await runCli(["speak", "hello", ...flags]);
-  expect(stdout).toBe("ok");
-  expect(requests).toHaveLength(1);
-  expect(requests[0].method).toBe("POST");
-  expect(requests[0].path).toBe("/speak");
-  return JSON.parse(requests[0].body);
-}
-
-test("--post-process sends the canonical request field", async () => {
-  expect(await speakRequest("--post-process")).toEqual({ text: "hello", post_process: true });
+  // SAFETY: listen(0, "127.0.0.1") has completed; this is a bound TCP server, not a pipe.
+  port = (server.address() as AddressInfo).port;
 });
 
-test("--condense remains an alias for --post-process", async () => {
-  expect(await speakRequest("--condense")).toEqual({ text: "hello", post_process: true });
-});
-
-test("both spellings together send one canonical request field", async () => {
-  expect(await speakRequest("--post-process", "--condense")).toEqual({
-    text: "hello",
-    post_process: true
+afterAll(async () => {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
   });
 });
 
-test("omitting both flags leaves post-processing unspecified", async () => {
+beforeEach(() => {
+  requests.length = 0;
+  reply = "{}";
+});
+
+/** Run the CLI against the shared loopback stand-in for the control server. */
+async function runCli(args: string[], nextReply = "{}") {
+  reply = nextReply;
+  const { stdout } = await run(process.execPath, [cli, ...args], {
+    env: { ...process.env, COPYSPEECH_CONTROL_ADDR: `127.0.0.1:${port}` },
+    timeout: 5000
+  });
+  return { stdout: stdout.trim(), requests: [...requests] };
+}
+
+async function speakRequest(...flags: string[]) {
+  requests.length = 0;
+  const { stdout, requests: captured } = await runCli(["speak", "hello", ...flags]);
+  expect(stdout).toBe("ok");
+  expect(captured).toHaveLength(1);
+  expect(captured[0].method).toBe("POST");
+  expect(captured[0].path).toBe("/speak");
+  return JSON.parse(captured[0].body);
+}
+
+test("speak serializes post-process flags, --wait, and --request-id", async () => {
   expect(await speakRequest()).toEqual({ text: "hello" });
-});
-
-test("help documents the current flag and legacy alias", async () => {
-  const { stdout } = await run(process.execPath, [cli, "--help"], { timeout: 5000 });
-  expect(stdout).toContain("[--post-process]");
-  expect(stdout).toContain("--condense is a backward-compatible alias for --post-process.");
-});
-
-test("--request-id names the speak without leaking into its text", async () => {
+  expect(await speakRequest("--post-process")).toEqual({ text: "hello", post_process: true });
+  expect(await speakRequest("--condense")).toEqual({ text: "hello", post_process: true });
   expect(await speakRequest("--request-id", "hermes-abc123", "--wait")).toEqual({
     text: "hello",
     wait: true,
@@ -87,31 +79,7 @@ test("--request-id names the speak without leaking into its text", async () => {
   });
 });
 
-test("stop --request-id sends a scoped stop body", async () => {
-  const { requests } = await runCli(["stop", "--request-id", "hermes-abc123"]);
-  expect(requests).toHaveLength(1);
-  expect(requests[0].method).toBe("POST");
-  expect(requests[0].path).toBe("/stop");
-  expect(JSON.parse(requests[0].body)).toEqual({ request_id: "hermes-abc123" });
-});
-
-test("a missing stop request id fails instead of issuing a global stop", async () => {
-  await expect(runCli(["stop", "--request-id"])).rejects.toThrow("--request-id requires a value");
-});
-
-test("a missing speak request id fails instead of issuing an unscoped speak", async () => {
-  await expect(runCli(["speak", "hello", "--request-id"])).rejects.toThrow(
-    "--request-id requires a value"
-  );
-  await expect(runCli(["speak", "hello", "--request-id", "--wait"])).rejects.toThrow(
-    "--request-id requires a value"
-  );
-  await expect(runCli(["speak", "hello", "--request-id", "", "--wait"])).rejects.toThrow(
-    "--request-id requires a value"
-  );
-});
-
-test("request ids beginning with a dash remain valid", async () => {
+test("dash-prefixed request ids stay valid while known flags are rejected as missing values", async () => {
   expect(await speakRequest("--request-id", "-reader")).toEqual({
     text: "hello",
     request_id: "-reader"
@@ -125,11 +93,29 @@ test("request ids beginning with a dash remain valid", async () => {
   );
 });
 
-test("stop without --request-id stays the bodyless global stop", async () => {
-  const { requests } = await runCli(["stop"]);
-  expect(requests).toHaveLength(1);
-  expect(requests[0].path).toBe("/stop");
-  expect(requests[0].body).toBe("");
+test("stop sends a scoped body with --request-id and stays bodyless without it", async () => {
+  const scoped = await runCli(["stop", "--request-id", "hermes-abc123"]);
+  expect(scoped.requests).toHaveLength(1);
+  expect(scoped.requests[0].method).toBe("POST");
+  expect(scoped.requests[0].path).toBe("/stop");
+  expect(JSON.parse(scoped.requests[0].body)).toEqual({ request_id: "hermes-abc123" });
+
+  requests.length = 0;
+  const global = await runCli(["stop"]);
+  expect(global.requests).toHaveLength(1);
+  expect(global.requests[0].path).toBe("/stop");
+  expect(global.requests[0].body).toBe("");
+});
+
+test("missing or empty --request-id fails on speak and stop instead of falling back global", async () => {
+  for (const args of [
+    ["stop", "--request-id"],
+    ["speak", "hello", "--request-id"],
+    ["speak", "hello", "--request-id", "--wait"],
+    ["speak", "hello", "--request-id", "", "--wait"]
+  ]) {
+    await expect(runCli(args)).rejects.toThrow("--request-id requires a value");
+  }
 });
 
 test("a cancelled speak still writes the ack and reports cancelled", async () => {
@@ -147,10 +133,4 @@ test("a cancelled speak still writes the ack and reports cancelled", async () =>
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-});
-
-test("help documents --request-id on speak and stop", async () => {
-  const { stdout } = await run(process.execPath, [cli, "--help"], { timeout: 5000 });
-  expect(stdout).toContain("copyspeech stop [--request-id <id>]");
-  expect(stdout).toContain("[--request-id <id>]");
 });

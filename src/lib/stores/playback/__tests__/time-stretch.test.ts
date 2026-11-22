@@ -64,6 +64,8 @@ function voiced(frames: number): Float32Array<ArrayBuffer> {
   return out;
 }
 
+const VOICED_THREE_FRAGMENTS = voiced(1.5 * SAMPLE_RATE);
+
 /** Largest per-sample step, restricted to (or, with `exclude`, away from) a window around each seam. */
 function maxDeltaNearSeams(
   samples: Float32Array,
@@ -90,25 +92,16 @@ describe("TimeStretcher", () => {
 
   // Pins the `pitch` setter + `stretch.tempo` override: SoundTouch derives
   // tempo = 1 / pitch from the setter, and we replace it with speed / pitch.
-  it.each([0.5, 1.5, 2])("changes duration by speed %s without moving pitch", (speed) => {
+  it.each([
+    [0.5, 1],
+    [1.5, 1],
+    [1, 0.75],
+    [2, 1.35]
+  ])("applies speed %s and pitch %s independently", (speed, pitch) => {
     const input = sine(2 * SAMPLE_RATE, 440);
-    const output = render(input, speed, 1);
+    const output = render(input, speed, pitch);
     expect(output.length / (input.length / speed)).toBeCloseTo(1, 1);
-    expect(crossingsPerSecond(output)).toBeCloseTo(880, -2);
-  });
-
-  it.each([0.75, 1.35])("changes pitch by %s without moving duration", (pitch) => {
-    const input = sine(2 * SAMPLE_RATE, 440);
-    const output = render(input, 1, pitch);
-    expect(output.length / input.length).toBeCloseTo(1, 1);
     expect(crossingsPerSecond(output)).toBeCloseTo(880 * pitch, -2);
-  });
-
-  it("applies speed and pitch independently when combined", () => {
-    const input = sine(2 * SAMPLE_RATE, 440);
-    const output = render(input, 2, 1.35);
-    expect(output.length / (input.length / 2)).toBeCloseTo(1, 1);
-    expect(crossingsPerSecond(output)).toBeCloseTo(880 * 1.35, -2);
   });
 
   it("keeps stereo channels aligned", () => {
@@ -144,8 +137,8 @@ describe("TimeStretcher", () => {
   ])(
     "keeps fragment seams as smooth as the surrounding audio (speed %s, pitch %s)",
     (speed, pitch) => {
-      const input = voiced(6 * SAMPLE_RATE);
-      const fragmentFrames = 2 * SAMPLE_RATE;
+      const input = VOICED_THREE_FRAGMENTS;
+      const fragmentFrames = 0.5 * SAMPLE_RATE;
       const chunkFrames = 2048;
       const stretcher = new TimeStretcher(SAMPLE_RATE, 1);
       stretcher.setRate(speed, pitch);

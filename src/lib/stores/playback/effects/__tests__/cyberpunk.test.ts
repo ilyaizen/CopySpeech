@@ -56,40 +56,27 @@ describe("cyberpunk effect", () => {
 
   it("stutters the first onset deterministically and keeps the original intact", () => {
     const input = twoBursts();
+    const onset = findOnsets(input, SR)[0];
+    expect(planStutters(input, SR, 42)[0].at).toBe(onset);
     const [out] = insertStutters([input], SR, 42);
     const [again] = insertStutters([input], SR, 42);
     expect(out.length).toBeGreaterThan(input.length);
     expect(again).toEqual(out);
     // Audio before the first onset is untouched; the tail matches the input tail.
-    const onset = findOnsets(input, SR)[0];
     expect(out.subarray(0, onset)).toEqual(input.subarray(0, onset));
     expect(out.subarray(out.length - 100)).toEqual(input.subarray(input.length - 100));
     // Inserted grains are audible.
     expect(Math.max(...out.subarray(onset, onset + 400).map(Math.abs))).toBeGreaterThan(0.1);
   });
 
-  it("always glitches the opening onset", () => {
-    const stutters = planStutters(twoBursts(), SR, 42);
-    expect(stutters[0].at).toBe(findOnsets(twoBursts(), SR)[0]);
-  });
-
-  it("glitches about half the onsets at random", () => {
-    const stutters = planStutters(longBursts(), SR, 7);
+  it("glitches about half of later onsets in place, adding time only for the opener", () => {
+    const input = longBursts();
+    const stutters = planStutters(input, SR, 7);
     // 200 onsets at 0.5 chance.
     expect(stutters.length).toBeGreaterThan(60);
     expect(stutters.length).toBeLessThan(140);
-  });
 
-  it("keeps glitches at least 0.6 s apart when onsets come faster", () => {
-    const stutters = planStutters(fastBursts(), SR, 7);
-    const gaps = stutters.slice(1).map((s, i) => (s.at - stutters[i].at) / SR);
-    expect(stutters.length).toBeGreaterThan(10);
-    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(0.6);
-  });
-
-  it("glitches later onsets in place, adding time only for the opener", () => {
-    const input = longBursts();
-    const [opener, ...rest] = planStutters(input, SR, 7);
+    const [opener, ...rest] = stutters;
     const [out] = insertStutters([input], SR, 7);
     const shift = opener.grain * opener.repeats;
     expect(out.length).toBe(input.length + shift);
@@ -102,6 +89,13 @@ describe("cyberpunk effect", () => {
     expect(out.subarray(at + shift + grain, at + shift + grain + 100)).toEqual(
       input.subarray(at + grain, at + grain + 100)
     );
+  });
+
+  it("keeps glitches at least 0.6 s apart when onsets come faster", () => {
+    const stutters = planStutters(fastBursts(), SR, 7);
+    const gaps = stutters.slice(1).map((s, i) => (s.at - stutters[i].at) / SR);
+    expect(stutters.length).toBeGreaterThan(10);
+    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(0.6);
   });
 
   it("leaves silence unchanged", () => {

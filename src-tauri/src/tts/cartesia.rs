@@ -609,27 +609,22 @@ mod tests {
         server.join().unwrap();
     }
 
-    #[tokio::test]
-    async fn streams_complete_body_and_surfaces_api_errors() {
-        for status in [200, 401] {
-            let server = wiremock::MockServer::start().await;
-            let body = if status == 200 {
-                format!(
-                    "data: {}\n\ndata: {}\n\ndata: {}\n\n",
-                    json!({ "type": "chunk", "data": "AQIDBA==" }),
-                    json!({
-                        "type": "timestamps",
-                        "word_timestamps": { "words": ["hello"], "start": [0.0], "end": [0.2] }
-                    }),
-                    json!({ "type": "done" })
-                )
-            } else {
-                "denied".into()
-            };
-            wiremock::Mock::given(wiremock::matchers::method("POST"))
-                .respond_with(wiremock::ResponseTemplate::new(status).set_body_string(body))
-                .mount(&server)
-                .await;
+    #[test]
+    fn streams_complete_body_and_surfaces_api_errors() {
+        let ok_body = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\n",
+            json!({ "type": "chunk", "data": "AQIDBA==" }),
+            json!({
+                "type": "timestamps",
+                "word_timestamps": { "words": ["hello"], "start": [0.0], "end": [0.2] }
+            }),
+            json!({ "type": "done" })
+        );
+        let server = crate::tts::test_http::TestServer::start(vec![
+            (200, ok_body.into_bytes()),
+            (401, b"denied".to_vec()),
+        ]);
+        for status in [200u16, 401] {
             let backend = CartesiaTtsBackend::new(CartesiaConfig {
                 api_key: "test-key".into(),
                 ..Default::default()
@@ -637,37 +632,33 @@ mod tests {
             let stream = backend
                 .synthesize_streaming_from(&server.uri(), "hello", "voice")
                 .unwrap();
-            tokio::task::spawn_blocking(move || {
-                let mut pcm = Vec::new();
-                let mut captions = None;
-                let mut failed = false;
-                while let Some(item) = stream.recv_timeout(Duration::from_secs(5)).unwrap() {
-                    match item {
-                        ChunkItem::Pcm(bytes) => pcm.extend(bytes),
-                        ChunkItem::Captions(value) => captions = Some(value),
-                        ChunkItem::ClearCaptions => captions = None,
-                        ChunkItem::Failed(reason) => {
-                            assert!(reason.contains("401"));
-                            failed = true;
-                        }
+            let mut pcm = Vec::new();
+            let mut captions = None;
+            let mut failed = false;
+            while let Some(item) = stream.recv_timeout(Duration::from_secs(5)).unwrap() {
+                match item {
+                    ChunkItem::Pcm(bytes) => pcm.extend(bytes),
+                    ChunkItem::Captions(value) => captions = Some(value),
+                    ChunkItem::ClearCaptions => captions = None,
+                    ChunkItem::Failed(reason) => {
+                        assert!(reason.contains("401"));
+                        failed = true;
                     }
                 }
-                if status == 200 {
-                    assert!(!failed);
-                    assert_eq!(pcm, vec![1, 2, 3, 4]);
-                    assert_eq!(captions.unwrap().words[0].end_ms, 200.0);
-                } else {
-                    assert!(failed);
-                    assert!(pcm.is_empty());
-                }
-            })
-            .await
-            .unwrap();
+            }
+            if status == 200 {
+                assert!(!failed);
+                assert_eq!(pcm, vec![1, 2, 3, 4]);
+                assert_eq!(captions.unwrap().words[0].end_ms, 200.0);
+            } else {
+                assert!(failed);
+                assert!(pcm.is_empty());
+            }
         }
     }
 
     #[test]
-    fn decoder_handles_transport_splits_and_maps_original_utf16_text() {
+    fn decoder_handles_transport_splits_utf16_and_unmappable_words() {
         let wire = format!(
             "data: {}\r\n\r\ndata: {}\r\n\r\ndata: {}\r\n\r\ndata: {}\r\n\r\ndata: {}",
             json!({ "type": "chunk", "data": "AQI=" }),
@@ -700,11 +691,8 @@ mod tests {
             );
             assert_eq!(items[3], ChunkItem::Pcm(vec![3, 4]));
         }
-    }
 
-    #[test]
-    fn unmappable_native_words_leave_audio_playable_without_fabricated_timing() {
-        let wire = format!(
+        let unmappable = format!(
             "data: {}\n\ndata: {}\n\ndata: {}\n\n",
             json!({ "type": "chunk", "data": "AQI=" }),
             json!({
@@ -715,7 +703,7 @@ mod tests {
         );
         assert_eq!(
             CartesiaSseDecoder::new("13".into())
-                .push(wire.as_bytes(), true)
+                .push(unmappable.as_bytes(), true)
                 .unwrap(),
             vec![ChunkItem::Pcm(vec![1, 2])]
         );

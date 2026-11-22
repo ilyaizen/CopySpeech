@@ -50,33 +50,19 @@ mod tests {
         }
     }
 
-    /// A config round-tripped through serde loses model/voice fields (they are
-    /// `skip_serializing` — the profile owns them). The label must come from the
-    /// profile, not the blanked global config. Regression for `Cartesia ()`.
     #[test]
-    fn label_prefers_profile_options_over_blanked_config() {
+    fn effective_backend_name_prefers_profile_options_and_falls_back_to_unset() {
         let loaded = loaded_config();
-        assert!(
-            loaded.cartesia.model_id.is_empty(),
-            "precondition: global model_id deserializes blank"
-        );
+        assert!(loaded.cartesia.model_id.is_empty());
 
-        let eff = cartesia_effective(Some("sonic-3.5"));
         assert_eq!(
-            effective_backend_name(&eff, &loaded),
+            effective_backend_name(&cartesia_effective(Some("sonic-3.5")), &loaded),
             "Cartesia (sonic-3.5)"
         );
-    }
-
-    #[test]
-    fn label_says_unset_when_nothing_is_configured() {
-        let loaded = loaded_config();
-        let eff = cartesia_effective(None);
-        assert_eq!(effective_backend_name(&eff, &loaded), "Cartesia (unset)");
-    }
-
-    #[test]
-    fn first_set_skips_blank_and_whitespace() {
+        assert_eq!(
+            effective_backend_name(&cartesia_effective(None), &loaded),
+            "Cartesia (unset)"
+        );
         assert_eq!(first_set(&["", "  ", "b"]), "b");
         assert_eq!(first_set(&["a", "b"]), "a");
         assert_eq!(first_set(&[""]), "unset");

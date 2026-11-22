@@ -280,18 +280,14 @@ mod tests {
     }
 
     #[test]
-    fn body_pins_model_input_and_wav() {
+    fn request_body_pins_model_wav_and_optional_voice() {
         let body = backend("voice_478").request_body("hello");
         assert_eq!(body["model"], MISTRAL_TTS_MODEL);
         assert_eq!(body["input"], "hello");
         assert_eq!(body["response_format"], "wav");
         assert_eq!(body["voice_id"], "voice_478");
-    }
 
-    #[test]
-    fn body_omits_voice_id_for_the_service_default() {
-        let body = backend("").request_body("hello");
-        assert!(body.get("voice_id").is_none());
+        assert!(backend("").request_body("hello").get("voice_id").is_none());
     }
 
     /// Live synthesis against api.mistral.ai on a preset voice. Opt-in: needs

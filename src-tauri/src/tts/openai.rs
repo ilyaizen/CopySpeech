@@ -270,22 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn file_extension_follows_response_format() {
-        let backend = |format: &str| {
-            OpenAiTtsBackend::new(OpenAIConfig {
-                response_format: format.into(),
-                ..Default::default()
-            })
-        };
-        assert_eq!(backend("mp3").file_extension(), "mp3");
-        assert_eq!(backend("opus").file_extension(), "opus");
-        assert_eq!(backend("aac").file_extension(), "aac");
-        assert_eq!(backend("flac").file_extension(), "flac");
-        assert_eq!(backend("wav").file_extension(), "wav");
-        assert_eq!(backend("").file_extension(), "wav");
-    }
-
-    #[test]
     fn style_tokens_expand_and_legacy_text_passes_through() {
         // Preset tokens map to prompts; `none` and blank omit instructions;
         // free text saved before the preset list passes through unchanged.

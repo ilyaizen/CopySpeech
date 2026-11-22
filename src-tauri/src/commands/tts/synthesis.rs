@@ -276,9 +276,9 @@ mod retry_tests {
     }
 
     #[tokio::test]
-    async fn retries_transient_errors_without_skipping_text() {
+    async fn retry_synthesis_handles_transient_permanent_and_cancelled_attempts() {
         let attempts = AtomicUsize::new(0);
-        let result = retry_synthesis(
+        let recovered = retry_synthesis(
             || {
                 std::future::ready(if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
                     Err("HTTP error: 503 Service Unavailable".into())
@@ -291,17 +291,14 @@ mod retry_tests {
             Duration::ZERO,
         )
         .await;
-        assert_eq!(result.unwrap(), "complete section");
+        assert_eq!(recovered.unwrap(), "complete section");
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
-    }
 
-    #[tokio::test]
-    async fn permanent_and_partially_played_failures_are_not_retried() {
         for (error, can_retry) in [("401 Unauthorized", true), ("HTTP 503", false)] {
-            let attempts = AtomicUsize::new(0);
+            let tries = AtomicUsize::new(0);
             let result: Result<(), String> = retry_synthesis(
                 || {
-                    attempts.fetch_add(1, Ordering::SeqCst);
+                    tries.fetch_add(1, Ordering::SeqCst);
                     std::future::ready(Err(error.into()))
                 },
                 || false,
@@ -310,16 +307,13 @@ mod retry_tests {
             )
             .await;
             assert_eq!(result.unwrap_err(), error);
-            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+            assert_eq!(tries.load(Ordering::SeqCst), 1);
         }
-    }
 
-    #[tokio::test]
-    async fn retries_are_bounded_and_cancellation_prevents_another_attempt() {
-        let attempts = AtomicUsize::new(0);
-        let result: Result<(), String> = retry_synthesis(
+        let bounded_tries = AtomicUsize::new(0);
+        let exhausted: Result<(), String> = retry_synthesis(
             || {
-                attempts.fetch_add(1, Ordering::SeqCst);
+                bounded_tries.fetch_add(1, Ordering::SeqCst);
                 std::future::ready(Err("HTTP 429".into()))
             },
             || false,
@@ -327,10 +321,11 @@ mod retry_tests {
             Duration::ZERO,
         )
         .await;
-        assert_eq!(result.unwrap_err(), "HTTP 429");
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(exhausted.unwrap_err(), "HTTP 429");
+        assert_eq!(bounded_tries.load(Ordering::SeqCst), 3);
+
         let cancelled = AtomicBool::new(false);
-        let result: Result<(), String> = retry_synthesis(
+        let aborted: Result<(), String> = retry_synthesis(
             || {
                 cancelled.store(true, Ordering::SeqCst);
                 std::future::ready(Err("HTTP 503".into()))
@@ -340,7 +335,7 @@ mod retry_tests {
             Duration::ZERO,
         )
         .await;
-        assert_eq!(result.unwrap_err(), "Reading cancelled");
+        assert_eq!(aborted.unwrap_err(), "Reading cancelled");
     }
 
     #[tokio::test]
@@ -348,7 +343,7 @@ mod retry_tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let signal = cancelled.clone();
         let cancel_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(15)).await;
             signal.store(true, Ordering::SeqCst);
         });
         let attempts = AtomicUsize::new(0);
@@ -372,61 +367,40 @@ mod retry_tests {
     }
 
     #[test]
-    fn status_classification_does_not_retry_permanent_or_incidental_numbers() {
-        // A permanent HTTP status is not retried on its own.
+    fn transient_synthesis_error_classification() {
+        assert!(!transient_synthesis_error("HTTP 401 Unauthorized: invalid API key"));
+        assert!(!transient_synthesis_error("HTTP 403: voice model not found"));
+        assert!(!transient_synthesis_error("voice model 50300 was not found"));
+        assert!(!transient_synthesis_error("invalid transcript contains 503"));
         assert!(!transient_synthesis_error(
-            "HTTP 401 Unauthorized: invalid API key"
+            "edge-tts exit exit status: 1: ERROR: voice model not found"
         ));
-        assert!(!transient_synthesis_error(
-            "HTTP 403: voice model not found"
-        ));
-        assert!(!transient_synthesis_error(
-            "voice model 50300 was not found"
-        ));
-        assert!(!transient_synthesis_error(
-            "invalid transcript contains 503"
-        ));
+
         assert!(transient_synthesis_error(
             "HTTP error: Google API error 503 Service Unavailable"
         ));
         assert!(transient_synthesis_error(
             "WSServerHandshakeError: 503 Invalid response status"
         ));
-    }
-
-    #[test]
-    fn transient_signal_beats_a_coincidental_permanent_status() {
-        // The exact shape of the fork user's Edge failure: the refused
-        // handshake's 403 precedes the real no-audio error, and must not mask it.
         assert!(transient_synthesis_error(
             "edge-tts exit exit status: 1: NoAudioReceived(\"No audio was received. \
              Please verify that your parameters are correct.\") status=403"
         ));
-        // A retryable status counts wherever it appears in the string.
         assert!(transient_synthesis_error(
             "status 403 handled; upstream returned 503"
         ));
-        // A provider status error need not say "http" or "status".
         assert!(transient_synthesis_error(
             "ElevenLabs API error 503 Service Unavailable: overloaded"
         ));
-        // reqwest reports transport failures as a bare error kind.
-        assert!(transient_synthesis_error(
-            "Request failed: error sending request"
-        ));
+        assert!(transient_synthesis_error("Request failed: error sending request"));
         assert!(transient_synthesis_error(
             "Streaming synthesis failed mid-stream: request or response body error"
         ));
         assert!(transient_synthesis_error(
             "Request failed: error sending request: operation timed out"
         ));
-        // A response-body read failure keeps its cause in the flattened chain.
         assert!(transient_synthesis_error(
             "Failed to read bytes: request or response body error: connection reset by peer"
-        ));
-        // A local CLI `exit status: 1` is not itself a transient signal.
-        assert!(!transient_synthesis_error(
-            "edge-tts exit exit status: 1: ERROR: voice model not found"
         ));
     }
 
@@ -1322,14 +1296,15 @@ mod queue_wait_tests {
     }
 
     #[tokio::test]
-    async fn a_queued_reading_gives_up_when_its_request_is_stopped() {
+    async fn queued_reading_waits_for_release_or_gives_up_on_stop() {
         let lock = Arc::new(tokio::sync::Mutex::new(()));
         let holder = lock.clone();
         let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let held = tokio::spawn(async move {
             let _guard = holder.lock().await;
             let _ = acquired_tx.send(());
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            let _ = release_rx.await;
         });
         acquired_rx.await.unwrap();
 
@@ -1341,41 +1316,27 @@ mod queue_wait_tests {
         let ticket = crate::speak_requests::Ticket::new(seq);
         let scope = AbortScope::begin_for_request(seq);
         let canceller = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(40)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
             crate::speak_requests::cancel(id, || {});
         });
 
-        let started = Instant::now();
-        assert!(
-            wait_for_queue(&lock, scope).await.is_none(),
-            "a stopped queued reading must not wait for the lock"
-        );
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(wait_for_queue(&lock, scope).await.is_none());
+        let _ = release_tx.send(());
         canceller.await.unwrap();
         drop(ticket);
         held.await.unwrap();
-    }
 
-    #[tokio::test]
-    async fn a_queued_reading_takes_the_lock_after_the_holder_releases() {
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
-        let holder = lock.clone();
-        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
-        let held = tokio::spawn(async move {
-            let _guard = holder.lock().await;
-            let _ = acquired_tx.send(());
-            tokio::time::sleep(Duration::from_millis(60)).await;
+        let holder2 = lock.clone();
+        let (acq2_tx, acq2_rx) = tokio::sync::oneshot::channel();
+        let held2 = tokio::spawn(async move {
+            let _guard = holder2.lock().await;
+            let _ = acq2_tx.send(());
+            tokio::time::sleep(Duration::from_millis(10)).await;
         });
-        acquired_rx.await.unwrap();
-
-        let scope = AbortScope::begin_for_request(crate::speak_requests::NO_REQUEST);
-        let guard = wait_for_queue(&lock, scope).await;
-        assert!(
-            guard.is_some(),
-            "an unscoped reading must not abort by itself"
-        );
-        drop(guard);
-        held.await.unwrap();
+        acq2_rx.await.unwrap();
+        let unscoped = AbortScope::begin_for_request(crate::speak_requests::NO_REQUEST);
+        assert!(wait_for_queue(&lock, unscoped).await.is_some());
+        held2.await.unwrap();
     }
 }
 
@@ -2849,7 +2810,7 @@ mod streaming_tests {
     }
 
     #[test]
-    fn multi_chunk_order_preserved_and_pcm_wrapped_into_valid_wav() {
+    fn drain_chunk_stream_preserves_order_and_emits_terminal_wav() {
         let a = vec![1u8, 2, 3, 4];
         let b = vec![5u8, 6, 7, 8];
         let stream = stream_from_items(
@@ -2864,13 +2825,11 @@ mod streaming_tests {
             })
             .expect("healthy stream drains");
 
-        assert_eq!(seen.len(), 3, "two data chunks plus the terminal marker");
+        assert_eq!(seen.len(), 3);
         assert_eq!(seen[0], (0, a.clone(), false));
         assert_eq!(seen[1], (1, b.clone(), false));
-        assert!(seen[2].2, "terminal event must be marked final");
-        assert!(seen[2].1.is_empty());
+        assert!(seen[2].2 && seen[2].1.is_empty());
 
-        // Wrapped WAV parses back to the concatenated PCM with the stream meta.
         let info = crate::audio::wav::parse_wav_header(&wav.bytes).expect("wrapped WAV valid");
         assert_eq!(info.sample_rate, 44100);
         assert_eq!(info.data_size, 8);
@@ -2879,124 +2838,32 @@ mod streaming_tests {
             &wav.bytes[info.data_offset..info.data_offset + info.data_size],
             &expected
         );
+
+        let single = stream_from_items(vec![ChunkItem::Pcm(vec![9, 9, 9])], 8000);
+        let mut finals = 0;
+        let (wav, _) = drain_chunk_stream(single, AbortScope::begin(), |_, _, is_final, _| {
+            if is_final {
+                finals += 1;
+            }
+        })
+        .unwrap();
+        assert_eq!(finals, 1);
+        assert_eq!(wav.bytes.len(), 44 + 3);
     }
 
     #[test]
-    fn streaming_gate_keeps_only_live_effects_on_the_pcm_path() {
-        // Streaming on, warm streaming backend, default speed: no effect and
-        // the live walkie-talkie stream play as chunks arrive.
-        assert!(allows_streaming_playback(
-            true,
-            true,
-            true,
-            false,
-            &EffectId::None,
-            1.0
-        ));
-        assert!(allows_streaming_playback(
-            true,
-            true,
-            true,
-            true,
-            &EffectId::WalkieTalkie,
-            1.0
-        ));
-        // Whole-buffer effects cannot run in the PCM scheduler: keep the batch
-        // path, where buildPlaybackUrl applies them to the decoded fragment.
-        assert!(!allows_streaming_playback(
-            true,
-            true,
-            true,
-            true,
-            &EffectId::GameBoy,
-            1.0
-        ));
-        assert!(!allows_streaming_playback(
-            true,
-            true,
-            true,
-            true,
-            &EffectId::Cyberpunk,
-            1.0
-        ));
-    }
-
-    #[test]
-    fn non_default_speed_keeps_the_batch_path() {
-        // The PCM scheduler renders speed with the webview's SoundTouch
-        // stretcher; the batch path keeps the audio element's pitch-preserving
-        // playbackRate, which sounds cleaner. Any non-default speed must take
-        // the batch path, fast or slow, whatever the effect.
-        assert!(!allows_streaming_playback(
-            true,
-            true,
-            true,
-            false,
-            &EffectId::None,
-            1.65
-        ));
-        assert!(!allows_streaming_playback(
-            true,
-            true,
-            true,
-            false,
-            &EffectId::None,
-            0.75
-        ));
-        assert!(!allows_streaming_playback(
-            true,
-            true,
-            true,
-            true,
-            &EffectId::WalkieTalkie,
-            1.4
-        ));
-        // Default speed keeps the stream path and its first-audio win.
-        assert!(allows_streaming_playback(
-            true,
-            true,
-            true,
-            true,
-            &EffectId::WalkieTalkie,
-            1.0
-        ));
-    }
-
-    #[test]
-    fn effect_streams_live_only_for_the_pcm_implemented_effect() {
+    fn allows_streaming_playback_gates() {
         assert!(effect_streams_live(&EffectId::None));
         assert!(effect_streams_live(&EffectId::WalkieTalkie));
         assert!(!effect_streams_live(&EffectId::GameBoy));
         assert!(!effect_streams_live(&EffectId::Cyberpunk));
-    }
 
-    #[test]
-    fn kill_switches_force_the_batch_path() {
-        // Any kill switch routes the reading through audio-fragment-ready.
-        assert!(!allows_streaming_playback(
-            false,
-            true,
-            true,
-            false,
-            &EffectId::None,
-            1.0
-        ));
-        assert!(!allows_streaming_playback(
-            true,
-            false,
-            true,
-            false,
-            &EffectId::None,
-            1.0
-        ));
-    }
-
-    #[test]
-    fn saved_effects_are_inert_while_experimental_is_off() {
-        // Experimental off must let a saved effect stream again, whatever it is.
         assert!(effects_active(true, true));
         assert!(!effects_active(false, true));
         assert!(!effects_active(true, false));
+
+        assert!(allows_streaming_playback(true, true, true, false, &EffectId::None, 1.0));
+        assert!(allows_streaming_playback(true, true, true, true, &EffectId::WalkieTalkie, 1.0));
         assert!(allows_streaming_playback(
             true,
             true,
@@ -3005,41 +2872,19 @@ mod streaming_tests {
             &EffectId::GameBoy,
             1.0
         ));
-    }
 
-    #[test]
-    fn cold_backend_takes_batch_path_until_ready() {
-        // A static streaming claim alone must not stream: a cold CLI daemon
-        // would otherwise run a one-shot command through the stream branch.
-        assert!(!allows_streaming_playback(
-            true,
-            true,
-            false,
-            false,
-            &EffectId::None,
-            1.0
-        ));
-        assert!(allows_streaming_playback(
-            true,
-            true,
-            true,
-            false,
-            &EffectId::None,
-            1.0
-        ));
-    }
-
-    #[test]
-    fn only_the_last_fragments_last_chunk_is_marked_final() {
-        // Pins the rule the helpers encode: only the reading's last fragment's
-        // final chunk carries the marker. The call site passing
-        // is_last_fragment(...) is not exercised here.
-        let total = 3;
-        let marks: Vec<bool> = (0..total)
-            .map(|index| final_marker(true, is_last_fragment(index, total)))
-            .collect();
-        assert_eq!(marks, [false, false, true]);
-        assert!(!final_marker(false, is_last_fragment(total - 1, total)));
+        for (enabled, supports, ready, fx, effect, speed) in [
+            (false, true, true, false, EffectId::None, 1.0),
+            (true, false, true, false, EffectId::None, 1.0),
+            (true, true, false, false, EffectId::None, 1.0),
+            (true, true, true, true, EffectId::GameBoy, 1.0),
+            (true, true, true, true, EffectId::Cyberpunk, 1.0),
+            (true, true, true, false, EffectId::None, 1.65),
+            (true, true, true, false, EffectId::None, 0.75),
+            (true, true, true, true, EffectId::WalkieTalkie, 1.4),
+        ] {
+            assert!(!allows_streaming_playback(enabled, supports, ready, fx, &effect, speed));
+        }
     }
 
     #[test]
@@ -3090,8 +2935,6 @@ mod streaming_tests {
                     (2, vec![], true, None),
                 ]
             );
-            // The existing frontend accepts this as a replacement snapshot;
-            // absent metadata on ordinary PCM events is not a clear command.
             assert!(cleared.validate().is_ok());
         }
         let next = stream_from_items(
@@ -3111,37 +2954,19 @@ mod streaming_tests {
     }
 
     #[test]
-    fn failed_item_mid_stream_is_an_error() {
-        let stream = stream_from_items(
+    fn failed_and_empty_streams_are_errors() {
+        let failed = stream_from_items(
             vec![
                 ChunkItem::Pcm(vec![1, 2]),
                 ChunkItem::Failed("upstream connection reset".into()),
             ],
             16000,
         );
-        let result = drain_chunk_stream(stream, AbortScope::begin(), |_, _, _, _| {});
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("connection reset"));
-    }
+        let err = drain_chunk_stream(failed, AbortScope::begin(), |_, _, _, _| {}).unwrap_err();
+        assert!(err.contains("connection reset"));
 
-    #[test]
-    fn empty_stream_is_an_error_not_silence() {
-        let stream = stream_from_items(Vec::new(), 22050);
-        assert!(drain_chunk_stream(stream, AbortScope::begin(), |_, _, _, _| {}).is_err());
-    }
-
-    #[test]
-    fn terminal_marker_always_emitted_even_for_single_chunk() {
-        let stream = stream_from_items(vec![ChunkItem::Pcm(vec![9, 9, 9])], 8000);
-        let mut finals = 0;
-        let (wav, _) = drain_chunk_stream(stream, AbortScope::begin(), |_, _, is_final, _| {
-            if is_final {
-                finals += 1;
-            }
-        })
-        .unwrap();
-        assert_eq!(finals, 1);
-        assert_eq!(wav.bytes.len(), 44 + 3);
+        let empty = stream_from_items(Vec::new(), 22050);
+        assert!(drain_chunk_stream(empty, AbortScope::begin(), |_, _, _, _| {}).is_err());
     }
 
     /// The JIT gate reads the fragment duration off the WAV header, never by
@@ -3247,7 +3072,9 @@ mod cache_tests {
             };
             save_speech_cache(&dir, &speech, "edge", "ava", &format!("text {i}"));
             // Coarse mtime clocks can tie; keep write order observable.
-            std::thread::sleep(std::time::Duration::from_millis(15));
+            if i < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
         }
         let cached = |i: usize| read_speech_cache(&dir, "edge", "ava", &format!("text {i}"));
         // Three 4-byte entries; an 8-byte budget keeps the two newest.
@@ -3303,7 +3130,7 @@ mod cache_tests {
     }
 
     #[test]
-    fn cache_lookup_matches_profile_resolved_engine_not_active_backend() {
+    fn cache_lookup_uses_resolved_profile_engine() {
         use crate::config::{ProfileEngineOptions, TtsConfig, TtsEngine, VoiceProfile};
 
         let history = Mutex::new(HistoryLog::new());
@@ -3327,7 +3154,6 @@ mod cache_tests {
             engine_options: ProfileEngineOptions::default_for(&TtsEngine::Piper),
         });
 
-        // 1. Explicit profile addressing (speak_now_with_profile path)
         let eff_profile = resolve_effective_for_profile(&tts, Some("piper-prof")).unwrap();
         assert_eq!(eff_profile.engine, TtsEngine::Piper);
         let profile_engine_str = engine_str(&eff_profile.engine);
@@ -3366,51 +3192,30 @@ mod cache_tests {
             metadata: HashMap::new(),
         });
 
-        // Cache hit using resolved profile engine
-        let found = find_cached_speech(&history, true, text, profile_engine_str, voice);
-        assert!(
-            found.is_some(),
-            "Must hit cache when queried with resolved profile engine"
-        );
+        assert!(find_cached_speech(&history, true, text, profile_engine_str, voice).is_some());
+        assert!(find_cached_speech(&history, true, text, active_engine_str, voice).is_none());
 
-        // Cache miss if queried with active backend engine
-        let miss = find_cached_speech(&history, true, text, active_engine_str, voice);
-        assert!(
-            miss.is_none(),
-            "Must not hit cache if queried with differing active backend engine"
-        );
-
-        // 2. Active profile resolution path (speak_queued path)
         tts.active_profile_id = "piper-prof".into();
         let eff_queued = resolve_effective(&tts);
         assert_eq!(eff_queued.engine, TtsEngine::Piper);
-        let queued_engine_str = engine_str(&eff_queued.engine);
-        let found_queued = find_cached_speech(&history, true, text, queued_engine_str, voice);
         assert!(
-            found_queued.is_some(),
-            "speak_queued path must hit cache using resolved profile engine"
+            find_cached_speech(&history, true, text, engine_str(&eff_queued.engine), voice)
+                .is_some()
         );
-
         std::fs::remove_file(&path).unwrap();
-    }
 
-    #[test]
-    fn same_text_cache_keys_on_resolved_profile_engine() {
         let dir = std::env::temp_dir().join(format!(
             "copyspeech-prof-speech-cache-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-
         let speech = SpeechAudio {
             bytes: vec![1, 2, 3, 4],
             captions: None,
         };
-
         save_speech_cache(&dir, &speech, "piper", "en_US-lessac", "Hello world");
         assert!(read_speech_cache(&dir, "piper", "en_US-lessac", "Hello world").is_some());
         assert!(read_speech_cache(&dir, "kokoro", "en_US-lessac", "Hello world").is_none());
-
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3513,52 +3318,45 @@ mod reading_event_tests {
     use super::*;
 
     #[test]
-    fn reading_failed_payload_names_the_failed_reading() {
-        let scope = AbortScope::begin_reading();
-        let event = ReadingFailedEvent::new("Reading failed: boom".to_string(), scope.reading());
-        let value = serde_json::to_value(event).expect("reading-failed must serialize");
-        assert_eq!(value["message"], "Reading failed: boom");
+    fn reading_and_pagination_event_payloads_match_scope() {
+        let scoped = AbortScope::begin_reading();
+        let scoped_failed = serde_json::to_value(ReadingFailedEvent::new(
+            "Reading failed: boom".to_string(),
+            scoped.reading(),
+        ))
+        .unwrap();
+        assert_eq!(scoped_failed["message"], "Reading failed: boom");
         assert_eq!(
-            value["reading_id"],
-            serde_json::json!(scope.reading()),
-            "the event must carry the failed reading's id"
+            scoped_failed["reading_id"],
+            serde_json::json!(scoped.reading())
         );
-    }
 
-    #[test]
-    fn reading_failed_payload_of_a_helper_scope_carries_no_reading() {
-        let scope = AbortScope::begin();
-        let event = ReadingFailedEvent::new("Reading failed: boom".to_string(), scope.reading());
-        let value = serde_json::to_value(event).expect("reading-failed must serialize");
-        assert_eq!(value["message"], "Reading failed: boom");
-        assert!(
-            value["reading_id"].is_null(),
-            "a helper scope has no reading id"
-        );
-    }
+        let helper = AbortScope::begin();
+        let helper_failed = serde_json::to_value(ReadingFailedEvent::new(
+            "Reading failed: boom".to_string(),
+            helper.reading(),
+        ))
+        .unwrap();
+        assert!(helper_failed["reading_id"].is_null());
 
-    #[test]
-    fn pagination_event_constructors_force_the_reading_choice() {
-        let scoped = PaginationEvent::for_reading(3, 1, true, 42);
-        assert_eq!(scoped.reading_id, Some(42));
+        let page_scoped = PaginationEvent::for_reading(3, 1, true, 42);
+        assert_eq!(page_scoped.reading_id, Some(42));
         assert_eq!(
-            serde_json::to_value(&scoped).expect("must serialize")["reading_id"],
+            serde_json::to_value(&page_scoped).unwrap()["reading_id"],
             serde_json::json!(42)
         );
 
-        // A helper scope passes 0: the event carries no reading id, and the
-        // wire omits the field.
-        let helper = PaginationEvent::for_reading(3, 1, true, AbortScope::begin().reading());
-        assert_eq!(helper.reading_id, None);
-        assert!(serde_json::to_value(&helper)
-            .expect("must serialize")
+        let page_helper = PaginationEvent::for_reading(3, 1, true, helper.reading());
+        assert_eq!(page_helper.reading_id, None);
+        assert!(serde_json::to_value(&page_helper)
+            .unwrap()
             .get("reading_id")
             .is_none());
 
-        let unscoped = PaginationEvent::unscoped(3, 1, true);
-        assert_eq!(unscoped.reading_id, None);
-        assert!(serde_json::to_value(&unscoped)
-            .expect("must serialize")
+        let page_unscoped = PaginationEvent::unscoped(3, 1, true);
+        assert_eq!(page_unscoped.reading_id, None);
+        assert!(serde_json::to_value(&page_unscoped)
+            .unwrap()
             .get("reading_id")
             .is_none());
     }

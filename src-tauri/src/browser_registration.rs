@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_names_host_and_pins_extension_origin() {
+    fn manifest_pins_extension_origin_and_strips_extended_length_prefix() {
         let exe = Path::new(r"C:\Users\User\AppData\Local\CopySpeech\copyspeech-browser-host.exe");
         let parsed: serde_json::Value =
             serde_json::from_str(&host_manifest_json(exe)).expect("valid json");
@@ -188,22 +188,13 @@ mod tests {
             parsed["allowed_origins"][0],
             format!("chrome-extension://{CHROME_EXTENSION_ID}/")
         );
-    }
 
-    #[test]
-    fn manifest_carries_a_plain_path_for_canonicalized_input() {
-        // Tauri's resource_dir() hands us this shape on Windows.
-        let exe =
+        let canonical =
             Path::new(r"\\?\C:\Users\User\AppData\Local\CopySpeech\copyspeech-browser-host.exe");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&host_manifest_json(exe)).expect("valid json");
-        assert_eq!(
-            parsed["path"],
-            serde_json::json!(
-                "C:\\Users\\User\\AppData\\Local\\CopySpeech\\copyspeech-browser-host.exe"
-            )
-        );
-        assert!(!parsed["path"]
+        let canon_json: serde_json::Value =
+            serde_json::from_str(&host_manifest_json(canonical)).expect("valid json");
+        assert_eq!(canon_json["path"], parsed["path"]);
+        assert!(!canon_json["path"]
             .as_str()
             .expect("string path")
             .contains(r"\\?\"));

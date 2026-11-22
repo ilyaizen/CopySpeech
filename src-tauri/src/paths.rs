@@ -121,8 +121,11 @@ mod tests {
     }
 
     #[test]
-    fn renames_whole_root_when_destination_absent() {
+    fn renames_whole_root_when_destination_absent_and_noops_without_legacy() {
         let base = temp_base("rename");
+        migrate_root(&base, false);
+        assert!(!base.join(APP_DIR).exists());
+
         let old = base.join(LEGACY_APP_DIR);
         fs::create_dir_all(old.join("logs")).unwrap();
         fs::write(old.join("config.json"), "{}").unwrap();
@@ -171,14 +174,6 @@ mod tests {
             "existing destination child wins; the legacy copy stays for manual cleanup"
         );
         assert!(new.join("engines").exists());
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn noop_without_legacy_dir() {
-        let base = temp_base("noop");
-        migrate_root(&base, false);
-        assert!(!base.join(APP_DIR).exists());
         let _ = fs::remove_dir_all(&base);
     }
 

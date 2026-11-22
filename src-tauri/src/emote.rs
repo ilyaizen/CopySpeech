@@ -115,24 +115,14 @@ mod tests {
     }
 
     #[test]
-    fn finds_single_and_multi_word_tags() {
+    fn finds_tags_ignores_malformed_and_includes_citations() {
         assert_eq!(
             texts("[sighs] well [clears throat] fine"),
             vec!["[sighs]", "[clears throat]"]
         );
-    }
-
-    #[test]
-    fn unterminated_and_oversized_brackets_are_not_tags() {
         assert!(texts("a [b").is_empty());
         assert!(texts(&format!("[{}]", "x".repeat(65))).is_empty());
         assert!(texts("line one [tag\nline two]").is_empty());
-    }
-
-    #[test]
-    fn citations_look_like_tags_here() {
-        // By shape [1] IS a bracket tag; the plain sanitizer keeps stripping
-        // it on the pre-LLM path, and the LLM prompt forbids it in output.
         assert_eq!(texts("See [1] now"), vec!["[1]"]);
     }
 

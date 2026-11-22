@@ -156,6 +156,156 @@ pub trait TtsBackend: Send + Sync {
 }
 
 #[cfg(test)]
+pub(crate) mod test_http {
+    use std::collections::{HashMap, VecDeque};
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    #[derive(Clone, Debug)]
+    pub(crate) struct CapturedRequest {
+        pub method: String,
+        pub path: String,
+        pub query: Option<String>,
+        headers: HashMap<String, String>,
+        #[allow(dead_code)]
+        pub body: Vec<u8>,
+    }
+
+    impl CapturedRequest {
+        pub(crate) fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .get(&name.to_ascii_lowercase())
+                .map(String::as_str)
+        }
+    }
+
+    pub(crate) struct TestServer {
+        addr: SocketAddr,
+        requests: Arc<Mutex<Vec<CapturedRequest>>>,
+        shutdown: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl TestServer {
+        pub(crate) fn start_one(status: u16, body: impl Into<Vec<u8>>) -> Self {
+            Self::start(vec![(status, body.into())])
+        }
+
+        pub(crate) fn start(responses: Vec<(u16, Vec<u8>)>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test HTTP server");
+            let addr = listener.local_addr().expect("local addr");
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let mut queue = VecDeque::from(responses);
+
+            let reqs_bg = Arc::clone(&requests);
+            let stop_bg = Arc::clone(&shutdown);
+            let worker = std::thread::spawn(move || loop {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                if stop_bg.load(Ordering::SeqCst) {
+                    break;
+                }
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut raw = Vec::new();
+                let mut byte = [0u8; 1];
+                while !raw.ends_with(b"\r\n\r\n") {
+                    if stream.read_exact(&mut byte).is_err() {
+                        break;
+                    }
+                    raw.push(byte[0]);
+                }
+                if !raw.ends_with(b"\r\n\r\n") {
+                    continue;
+                }
+                let header_text = String::from_utf8_lossy(&raw);
+                let mut lines = header_text.split("\r\n");
+                let request_line = lines.next().unwrap_or("");
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().unwrap_or("").to_string();
+                let target = parts.next().unwrap_or("/");
+                let (path, query) = match target.split_once('?') {
+                    Some((p, q)) => (p.to_string(), Some(q.to_string())),
+                    None => (target.to_string(), None),
+                };
+
+                let mut headers = HashMap::new();
+                for line in lines {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+                    }
+                }
+                let content_len = headers
+                    .get("content-length")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0u8; content_len];
+                if content_len > 0 && stream.read_exact(&mut body).is_err() {
+                    continue;
+                }
+
+                reqs_bg.lock().unwrap().push(CapturedRequest {
+                    method,
+                    path,
+                    query,
+                    headers,
+                    body,
+                });
+
+                let (status, resp_body) = queue
+                    .pop_front()
+                    .unwrap_or_else(|| (500, b"unexpected request".to_vec()));
+                let reason = match status {
+                    200 => "OK",
+                    401 => "Unauthorized",
+                    _ => "Response",
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    resp_body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&resp_body);
+                let _ = stream.flush();
+            });
+
+            Self {
+                addr,
+                requests,
+                shutdown,
+                worker: Some(worker),
+            }
+        }
+
+        pub(crate) fn uri(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        pub(crate) fn requests(&self) -> Vec<CapturedRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(self.addr);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{block_on_async, TtsBackend, TtsError};
 
@@ -189,14 +339,9 @@ mod tests {
     }
 
     #[test]
-    fn block_on_async_runs_without_an_ambient_runtime() {
+    fn block_on_async_works_with_and_without_ambient_runtime() {
         assert_eq!(block_on_async(async { 7 }), 7);
-    }
 
-    #[test]
-    fn block_on_async_runs_from_a_blocking_task_inside_a_runtime() {
-        // Backends call this from spawn_blocking/std threads inside the app's
-        // runtime; the helper must reuse that runtime instead of building one.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let value = rt.block_on(async {
             tokio::task::spawn_blocking(|| block_on_async(async { 9 }))

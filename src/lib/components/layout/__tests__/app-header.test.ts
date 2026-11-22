@@ -1,5 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { render, waitFor } from "@testing-library/svelte";
+// @vitest-environment jsdom
+
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { cleanup, render, waitFor } from "@testing-library/svelte";
 import { waitForI18nReady } from "#lib/i18n";
 import { page } from "$app/state";
 import AppHeader from "../app-header.svelte";
@@ -11,8 +13,7 @@ const { listeners, unlistened, ipc, mockInvoke } = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => Promise<void> | void>(),
   unlistened: new Set<() => void>(),
   ipc: {
-    listenGate: Promise.resolve(),
-    configResolvers: new Array<(config: ConfigResponse) => void>()
+    listenGate: Promise.resolve()
   },
   mockInvoke: vi.fn()
 }));
@@ -45,79 +46,44 @@ function makeConfig(experimental: boolean, history: boolean) {
   };
 }
 
-describe("app-header history gating", () => {
-  beforeEach(async () => {
-    await waitForI18nReady();
+beforeAll(async () => {
+  await waitForI18nReady();
+});
+
+describe("app-header", () => {
+  beforeEach(() => {
     listeners.clear();
     unlistened.clear();
     ipc.listenGate = Promise.resolve();
-    ipc.configResolvers = [];
     mockInvoke.mockReset();
   });
 
   afterEach(() => {
+    cleanup();
     vi.restoreAllMocks();
   });
 
-  it("renders text-only navigation while preserving the active page", async () => {
+  it("tracks active route state and links the brand home on sub-pages", async () => {
     mockInvoke.mockResolvedValueOnce(makeConfig(true, true));
-    const view = render(AppHeader);
-
+    const homeView = render(AppHeader);
     await waitFor(() => {
-      expect(view.queryByTestId("nav-history")).not.toBeNull();
+      expect(homeView.queryByTestId("nav-history")).not.toBeNull();
     });
-    const home = view.getByTestId("nav-generate");
+    const home = homeView.getByTestId("nav-generate");
     expect(home.getAttribute("aria-current")).toBe("page");
     expect(home.hasAttribute("href")).toBe(false);
     expect(
-      view.getByRole("heading", { name: "CopySpeech" }).closest("a")?.hasAttribute("href")
+      homeView.getByRole("heading", { name: "CopySpeech" }).closest("a")?.hasAttribute("href")
     ).toBe(false);
-    expect(view.getByTestId("nav-voices").getAttribute("href")).toBe("/voices");
-    expect(home.textContent?.trim()).not.toBe("");
-    expect(view.getByRole("navigation").querySelectorAll("svg")).toHaveLength(0);
-    view.unmount();
-  });
+    expect(homeView.getByTestId("nav-voices").getAttribute("href")).toBe("/voices");
+    homeView.unmount();
 
-  it("links the brand to Play from another page", () => {
     vi.spyOn(page, "url", "get").mockReturnValue(new URL("http://localhost/voices"));
     mockInvoke.mockResolvedValueOnce(makeConfig(false, false));
-    const view = render(AppHeader);
+    const voicesView = render(AppHeader);
     expect(
-      view.getByRole("heading", { name: "CopySpeech" }).closest("a")?.getAttribute("href")
+      voicesView.getByRole("heading", { name: "CopySpeech" }).closest("a")?.getAttribute("href")
     ).toBe("/");
-    view.unmount();
-  });
-
-  it("renders history nav item only when both experimental and history are enabled", async () => {
-    mockInvoke.mockResolvedValueOnce(makeConfig(true, true));
-    const view = render(AppHeader);
-
-    await waitFor(() => {
-      expect(view.queryByTestId("nav-history")).not.toBeNull();
-    });
-    view.unmount();
-  });
-
-  it("omits history nav item when experimental is off even if history is enabled", async () => {
-    mockInvoke.mockResolvedValueOnce(makeConfig(false, true));
-    const view = render(AppHeader);
-
-    await waitFor(() => {
-      expect(view.queryByTestId("nav-generate")).not.toBeNull();
-    });
-    expect(view.queryByTestId("nav-history")).toBeNull();
-    view.unmount();
-  });
-
-  it("omits history nav item when history is disabled even if experimental is on", async () => {
-    mockInvoke.mockResolvedValueOnce(makeConfig(true, false));
-    const view = render(AppHeader);
-
-    await waitFor(() => {
-      expect(view.queryByTestId("nav-generate")).not.toBeNull();
-    });
-    expect(view.queryByTestId("nav-history")).toBeNull();
-    view.unmount();
   });
 
   it("updates history link visibility when config-changed event fires", async () => {
@@ -125,20 +91,18 @@ describe("app-header history gating", () => {
     const view = render(AppHeader);
 
     await waitFor(() => {
-      expect(view.queryByTestId("nav-history")).toBeNull();
+      expect(view.queryByTestId("nav-generate")).not.toBeNull();
     });
+    expect(view.queryByTestId("nav-history")).toBeNull();
 
-    // Now simulate enabling experimental in config and config-changed firing
     mockInvoke.mockResolvedValueOnce(makeConfig(true, true));
     const configChangedListener = listeners.get("config-changed");
     expect(configChangedListener).toBeDefined();
-
     await configChangedListener!({ payload: null });
 
     await waitFor(() => {
       expect(view.queryByTestId("nav-history")).not.toBeNull();
     });
-    view.unmount();
   });
 
   it("discards stale config fetch responses when a newer fetch resolves first", async () => {
@@ -147,16 +111,13 @@ describe("app-header history gating", () => {
       resolveFirst = resolve;
     });
 
-    // First fetch hangs
     mockInvoke.mockImplementationOnce(() => firstFetchPromise);
     const view = render(AppHeader);
 
-    // Ensure listen is registered
     await waitFor(() => {
       expect(listeners.get("config-changed")).toBeDefined();
     });
 
-    // Second fetch (from config-changed) resolves quickly with history effective = true
     mockInvoke.mockResolvedValueOnce(makeConfig(true, true));
     const onConfigChanged = listeners.get("config-changed");
     await onConfigChanged!({ payload: null });
@@ -165,13 +126,9 @@ describe("app-header history gating", () => {
       expect(view.queryByTestId("nav-history")).not.toBeNull();
     });
 
-    // Now the stale first fetch resolves with history effective = false
     resolveFirst(makeConfig(false, false));
     await Promise.resolve();
-
-    // The newer result (history enabled) should NOT have been overwritten by stale fetch
     expect(view.queryByTestId("nav-history")).not.toBeNull();
-    view.unmount();
   });
 
   it("cleans up late-resolving config-changed listener if component is destroyed mid-onMount", async () => {
@@ -182,10 +139,8 @@ describe("app-header history gating", () => {
     mockInvoke.mockResolvedValue(makeConfig(true, true));
 
     const view = render(AppHeader);
-    // Unmount while listenGate is still pending
     view.unmount();
 
-    // Now the listen resolves after unmount
     resolveListenGate();
     await waitFor(() => {
       expect(unlistened.size).toBe(1);

@@ -29,7 +29,7 @@ CopySpeech: A lightweight and modern cross-platform AI text-to-speech orchestrat
 
 - Use `i-have-adhd` skill: next action first, numbered steps, no preamble.
 - During edits, run focused tests relevant to the change; batch related frontend test files in one invocation. Reserve full gates for the final changes before merging.
-- Before merging, run `bun run check && bun run test` (vitest; bare `bun test` fails ~39 document-dependent tests) and relevant backend gates. `bun run tauri dev` is already running.
+- Before merging, run `bun run check && bun run test` (vitest; bare `bun test` fails document-dependent tests) and relevant backend gates. `bun run tauri dev` is already running.
 - Run checks (`git diff --check` included) and commits only after explicit confirmation. Ask before concluding task.
 - Run the checks yourself before merging: all three workflows are `workflow_dispatch`, so PRs and `main` pushes trigger no CI.
 - Run `rustfmt` on touched Rust files only; `cargo fmt --all` marks unrelated CRLF-tracked files modified.

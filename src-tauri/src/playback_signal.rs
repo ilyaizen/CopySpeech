@@ -196,61 +196,53 @@ mod tests {
     async fn unscoped_wait_observes_only_finishes_after_subscription() {
         let _guard = TEST_LOCK.lock().unwrap();
         signal_finished_for(None);
-        assert!(
-            !PlaybackWait::new(None)
-                .wait(Duration::from_millis(50))
-                .await
-        );
+        assert!(!PlaybackWait::new(None).wait(Duration::ZERO).await);
         let waiter = PlaybackWait::new(None);
         signal_finished_for(Some(7));
-        assert!(waiter.wait(Duration::from_millis(50)).await);
+        assert!(waiter.wait(Duration::ZERO).await);
     }
 
     #[tokio::test]
-    async fn foreign_finish_cannot_overwrite_a_subscribed_readings_finish() {
+    async fn scoped_wait_matches_only_its_own_reading_finish() {
         let _guard = TEST_LOCK.lock().unwrap();
-        let id = "playback-finish-not-overwritten";
-        let crate::speak_requests::Registration::Proceed(seq) = crate::speak_requests::register(id)
+
+        let id1 = "playback-finish-not-overwritten";
+        let crate::speak_requests::Registration::Proceed(seq1) =
+            crate::speak_requests::register(id1)
         else {
             panic!("request must register");
         };
-        let _ticket = crate::speak_requests::Ticket::new(seq);
-        crate::speak_requests::attach_reading(seq, 876543);
-        let waiter = PlaybackWait::new(Some(id));
+        let _t1 = crate::speak_requests::Ticket::new(seq1);
+        crate::speak_requests::attach_reading(seq1, 876543);
+        let w1 = PlaybackWait::new(Some(id1));
         signal_finished_for(Some(876543));
         signal_finished_for(Some(876544));
-        assert!(waiter.wait(Duration::from_millis(100)).await);
-    }
+        assert!(w1.wait(Duration::ZERO).await);
 
-    #[tokio::test]
-    async fn finishes_before_reading_attaches_do_not_satisfy_request() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        let id = "playback-finish-before-reading";
-        let crate::speak_requests::Registration::Proceed(seq) = crate::speak_requests::register(id)
+        let id2 = "playback-finish-before-reading";
+        let crate::speak_requests::Registration::Proceed(seq2) =
+            crate::speak_requests::register(id2)
         else {
             panic!("request must register");
         };
-        let _ticket = crate::speak_requests::Ticket::new(seq);
-        let waiter = PlaybackWait::new(Some(id));
+        let _t2 = crate::speak_requests::Ticket::new(seq2);
+        let w2 = PlaybackWait::new(Some(id2));
         signal_finished_for(None);
-        crate::speak_requests::attach_reading(seq, 876545);
-        assert!(!waiter.wait(Duration::from_millis(50)).await);
-    }
+        crate::speak_requests::attach_reading(seq2, 876545);
+        assert!(!w2.wait(Duration::ZERO).await);
 
-    #[tokio::test]
-    async fn foreign_and_unattributed_finishes_do_not_release_a_reading() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        let id = "playback-finish-foreign";
-        let crate::speak_requests::Registration::Proceed(seq) = crate::speak_requests::register(id)
+        let id3 = "playback-finish-foreign";
+        let crate::speak_requests::Registration::Proceed(seq3) =
+            crate::speak_requests::register(id3)
         else {
             panic!("request must register");
         };
-        let _ticket = crate::speak_requests::Ticket::new(seq);
-        crate::speak_requests::attach_reading(seq, 876546);
-        let waiter = PlaybackWait::new(Some(id));
+        let _t3 = crate::speak_requests::Ticket::new(seq3);
+        crate::speak_requests::attach_reading(seq3, 876546);
+        let w3 = PlaybackWait::new(Some(id3));
         signal_finished_for(Some(876547));
         signal_finished_for(None);
-        assert!(!waiter.wait(Duration::from_millis(50)).await);
+        assert!(!w3.wait(Duration::ZERO).await);
     }
 
     #[test]
@@ -288,11 +280,8 @@ mod tests {
         assert_eq!(stale.fresh(), None);
     }
 
-    /// The JIT gate reads a progress snapshot out of the caption JSON: the
-    /// webview sends fractional positions and (on the batch path) can send a
-    /// null duration before the audio decodes.
     #[test]
-    fn progress_parses_fractional_positions_and_optional_fields() {
+    fn progress_parses_valid_and_rejects_malformed_snapshots() {
         let progress = parse_progress(
             r#"{"active":true,"fragment_index":2,"position_ms":1234.7,"duration_ms":41000.2,"paused":false}"#,
         )
@@ -320,12 +309,7 @@ mod tests {
         assert_eq!(undecoded.position_ms, 0);
         assert_eq!(undecoded.duration_ms, 0);
         assert!(undecoded.paused);
-    }
 
-    /// A malformed or non-object snapshot yields no progress, which the JIT
-    /// gate treats as a dead caption clock rather than as a position.
-    #[test]
-    fn progress_rejects_malformed_snapshots() {
         assert_eq!(parse_progress("not json"), None);
         assert_eq!(parse_progress("[]"), None);
         assert_eq!(parse_progress("null"), None);

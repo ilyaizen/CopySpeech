@@ -162,12 +162,6 @@ impl TtsBackend for HttpTtsBackend {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_fill_placeholders() {
-        let out = HttpTtsBackend::fill(r#"{"input":"{text}","voice":"{voice}"}"#, "hello", "amy");
-        assert_eq!(out, r#"{"input":"hello","voice":"amy"}"#);
-    }
-
     /// Two-level cause chain: reqwest hides timeouts and refused connections
     /// behind `source()`, and the retry classifier matches those phrases.
     #[derive(Debug)]

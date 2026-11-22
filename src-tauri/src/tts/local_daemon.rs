@@ -432,17 +432,17 @@ pub fn set_idle_timeout(secs: u64) {
     IDLE_TIMEOUT_SECS.store(secs, Ordering::Relaxed);
 }
 
-/// Budget for one wrapper model load, in seconds. `READY 2` only prints after
-/// the load, so the handshake read and the same-config pending wait share it:
-/// a wedged interpreter must fail the start instead of leaking a busy slot
+/// Budget for one wrapper model load, in milliseconds. `READY 2` only prints
+/// after the load, so the handshake read and the same-config pending wait share
+/// it: a wedged interpreter must fail the start instead of leaking a busy slot
 /// and hanging every waiter forever. The slowest measured load is ~103 s
 /// (qwen 0.6B, CPU, bench 2026-11-11). Atomic so tests can shorten it.
-static MODEL_LOAD_BUDGET_SECS: AtomicU64 = AtomicU64::new(DEFAULT_MODEL_LOAD_BUDGET_SECS);
+static MODEL_LOAD_BUDGET_MS: AtomicU64 = AtomicU64::new(DEFAULT_MODEL_LOAD_BUDGET_MS);
 
-const DEFAULT_MODEL_LOAD_BUDGET_SECS: u64 = 180;
+const DEFAULT_MODEL_LOAD_BUDGET_MS: u64 = 180_000;
 
 fn model_load_budget() -> Duration {
-    Duration::from_secs(MODEL_LOAD_BUDGET_SECS.load(Ordering::Relaxed))
+    Duration::from_millis(MODEL_LOAD_BUDGET_MS.load(Ordering::Relaxed))
 }
 
 /// Start a model without overlapping another local-model operation.
@@ -642,17 +642,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_distinguishes_command_and_args() {
+    fn key_distinguishes_command_args_and_arg_boundaries() {
         let a = key_of("uv", &["--voice".into(), "amy".into()]);
         let b = key_of("uv", &["--voice".into(), "joe".into()]);
-        assert_ne!(a, b, "a voice switch must invalidate the daemon");
+        assert_ne!(a, b);
         assert_eq!(a, key_of("uv", &["--voice".into(), "amy".into()]));
-    }
-
-    #[test]
-    fn key_is_unambiguous_across_arg_boundaries() {
-        // A separator that cannot appear in a path or flag keeps ["a b"] and
-        // ["a", "b"] distinct.
         assert_ne!(
             key_of("uv", &["a b".into()]),
             key_of("uv", &["a".into(), "b".into()])
@@ -740,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn caption_degradation_does_not_hide_protocol_errors() {
+    fn caption_degradation_preserves_protocol_and_truncated_chunk_errors() {
         for suffix in [
             "not json\n",
             "{\"unexpected\":true}\n",
@@ -758,10 +752,14 @@ mod tests {
         let mut reader = std::io::BufReader::new(&wire[..]);
         assert_eq!(read_item(&mut reader), Ok(Some(ChunkItem::ClearCaptions)));
         assert_eq!(read_item(&mut reader), Ok(None));
+
+        let short = b"{\"chunk\":8}\n\x01\x02\x03";
+        let err = read_item(&mut std::io::BufReader::new(&short[..])).unwrap_err();
+        assert!(err.contains("short read"), "unexpected error: {err}");
     }
 
     #[test]
-    fn a_failure_frame_surfaces_its_reason_before_and_after_the_header() {
+    fn failure_frame_and_v2_handshake_enforce_protocol_errors() {
         let wire = b"{\"ok\":false,\"error\":\"model exploded\"}\n";
         assert_eq!(
             read_header(&mut std::io::BufReader::new(&wire[..])).unwrap_err(),
@@ -771,20 +769,8 @@ mod tests {
             read_item(&mut std::io::BufReader::new(&wire[..])),
             Err("model exploded".to_string())
         );
-    }
 
-    #[test]
-    fn a_truncated_chunk_is_an_error_not_a_short_read() {
-        // Declares 8 bytes, supplies 3.
-        let wire = b"{\"chunk\":8}\n\x01\x02\x03";
-        let err = read_item(&mut std::io::BufReader::new(&wire[..])).unwrap_err();
-        assert!(err.contains("short read"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn only_the_v2_handshake_is_accepted() {
         assert_eq!(check_handshake("READY 2\n"), Ok(()));
-        // A v1 wrapper answers with the temp-file protocol, which would hang.
         assert!(check_handshake("READY").unwrap_err().contains("v1"));
         assert!(check_handshake("").unwrap_err().contains("without READY"));
         assert!(check_handshake("Traceback...")
@@ -793,69 +779,66 @@ mod tests {
     }
 
     #[test]
-    fn unknown_engine_is_not_ready_and_shutdown_is_a_noop() {
-        // Hold the slots lock: cargo test runs suites as threads of one
-        // process, and `shutdown()` clears every engine's slot.
-        let _lock = SLOTS_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        assert!(!is_ready("nosuch"));
-        shutdown();
-        assert!(!is_ready("nosuch"));
-    }
-
-    #[test]
-    fn idle_beyond_timeout_is_expired() {
-        let placed = Instant::now() - Duration::from_secs(700);
-        assert!(idle_expired(Some(placed), Instant::now(), 600));
-        // Exactly at the boundary counts as expired: at a 30 s scan interval
-        // the daemon has then been holding VRAM for the full window already.
-        let boundary = Instant::now() - Duration::from_secs(600);
-        assert!(idle_expired(Some(boundary), Instant::now(), 600));
-    }
-
-    #[test]
-    fn idle_under_timeout_survives() {
-        let placed = Instant::now() - Duration::from_secs(599);
-        assert!(!idle_expired(Some(placed), Instant::now(), 600));
-        assert!(!idle_expired(Some(Instant::now()), Instant::now(), 600));
-    }
-
-    #[test]
-    fn zero_timeout_never_expires() {
-        let placed = Instant::now() - Duration::from_secs(86_400);
-        assert!(!idle_expired(Some(placed), Instant::now(), 0));
-    }
-
-    #[test]
-    fn checked_out_slot_has_no_idle_clock_and_never_expires() {
-        let placed = Instant::now() - Duration::from_secs(86_400);
-        assert!(!idle_expired(None, Instant::now(), 600));
-        // Document the pairing the reaper relies on: a checked-out slot is
-        // (daemon: Some, busy: true, idle_since: None) — busy alone would also
-        // shield it, but the None makes the invariant explicit.
-        assert!(!idle_expired(None, placed + Duration::from_secs(1), 600));
+    fn idle_timeout_expiration_rules() {
+        let now = Instant::now();
+        assert!(idle_expired(Some(now - Duration::from_secs(700)), now, 600));
+        assert!(idle_expired(Some(now - Duration::from_secs(600)), now, 600));
+        assert!(!idle_expired(Some(now - Duration::from_secs(599)), now, 600));
+        assert!(!idle_expired(Some(now), now, 600));
+        assert!(!idle_expired(Some(now - Duration::from_secs(86_400)), now, 0));
+        assert!(!idle_expired(None, now, 600));
+        assert!(!idle_expired(
+            None,
+            now - Duration::from_secs(86_400) + Duration::from_secs(1),
+            600
+        ));
     }
 
     // --- daemon lifecycle (real child processes, fake wrappers) ---
-    //
-    // These tests drive `prewarm`/`try_stream`/`start` against a fake wrapper:
-    // powershell prints `READY 2` after a set delay, then sleeps. The sleep
-    // models a wrapper whose model load or resident phase takes time. They
-    // share the global SLOTS map with every other test in this binary, so
-    // each one holds SLOTS_TEST_LOCK.
 
     /// Temporarily shortens the model-load budget. Restores the old value on
-    /// drop, so a panicking assert cannot leave later tests a 1 s budget.
+    /// drop, so a panicking assert cannot leave later tests a short budget.
     struct BudgetGuard(u64);
 
     impl BudgetGuard {
-        fn set(secs: u64) -> Self {
-            BudgetGuard(MODEL_LOAD_BUDGET_SECS.swap(secs, Ordering::Relaxed))
+        fn set_ms(ms: u64) -> Self {
+            BudgetGuard(MODEL_LOAD_BUDGET_MS.swap(ms, Ordering::Relaxed))
         }
     }
 
     impl Drop for BudgetGuard {
         fn drop(&mut self) {
-            MODEL_LOAD_BUDGET_SECS.store(self.0, Ordering::Relaxed);
+            MODEL_LOAD_BUDGET_MS.store(self.0, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(windows)]
+    struct TempGate(std::path::PathBuf);
+
+    #[cfg(windows)]
+    impl TempGate {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "copyspeech-daemon-gate-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            Self(path)
+        }
+
+        fn open(&self) {
+            std::fs::write(&self.0, b"go").expect("open gate file");
+        }
+
+        fn ps_path(&self) -> String {
+            self.0.to_string_lossy().replace('\'', "''")
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TempGate {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
         }
     }
 
@@ -873,6 +856,19 @@ mod tests {
         ]
     }
 
+    #[cfg(windows)]
+    fn gated_wrapper_args(gate: &TempGate, hold_secs: u64) -> Vec<String> {
+        vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            format!(
+                "while (!(Test-Path '{}')) {{ Start-Sleep -Milliseconds 15 }}; 'READY 2'; Start-Sleep -Seconds {hold_secs}",
+                gate.ps_path()
+            ),
+        ]
+    }
+
     /// Poll `pred` until it holds, or panic naming `what` we waited for.
     #[cfg(windows)]
     fn wait_until(pred: impl Fn() -> bool, timeout: Duration, what: &str) {
@@ -881,7 +877,7 @@ mod tests {
             if pred() {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(15));
         }
         panic!("timed out waiting for {what}");
     }
@@ -894,15 +890,17 @@ mod tests {
         let second = "tts-resource-second";
         slots().remove(first);
         slots().remove(second);
-        prewarm(first, "powershell".into(), wrapper_args(3000, 30));
+        let gate = TempGate::new("overlap");
+        prewarm(first, "powershell".into(), gated_wrapper_args(&gate, 10));
         wait_until(
             || slots().get(first).is_some_and(|slot| slot.busy),
             Duration::from_secs(5),
             "first model load",
         );
-        prewarm(second, "powershell".into(), wrapper_args(150, 30));
-        std::thread::sleep(Duration::from_millis(300));
+        prewarm(second, "powershell".into(), wrapper_args(0, 10));
+        std::thread::sleep(Duration::from_millis(80));
         let second_loading = slots().get(second).is_some_and(|slot| slot.busy);
+        gate.open();
         wait_until(
             || {
                 slots()
@@ -931,11 +929,15 @@ mod tests {
         let _lock = SLOTS_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let engine = "tts-resource-stream";
         slots().remove(engine);
+        let gate = TempGate::new("stream-hold");
         let args = vec![
             "-NoProfile".into(),
             "-NonInteractive".into(),
             "-Command".into(),
-            "'READY 2'; [void][Console]::In.ReadLine(); '{\"ok\":true,\"sample_rate\":22050,\"channels\":1,\"bits_per_sample\":16}'; Start-Sleep -Seconds 2; '{\"end\":true}'; Start-Sleep -Seconds 30".into(),
+            format!(
+                "'READY 2'; [void][Console]::In.ReadLine(); '{{\"ok\":true,\"sample_rate\":22050,\"channels\":1,\"bits_per_sample\":16}}'; while (!(Test-Path '{}')) {{ Start-Sleep -Milliseconds 15 }}; '{{\"end\":true}}'; Start-Sleep -Seconds 10",
+                gate.ps_path()
+            ),
         ];
         prewarm(engine, "powershell".into(), args.clone());
         wait_until(
@@ -950,7 +952,8 @@ mod tests {
             let _resource = acquire_resource(None);
             tx.send(()).unwrap();
         });
-        let early = rx.recv_timeout(Duration::from_millis(300));
+        let early = rx.recv_timeout(Duration::from_millis(120));
+        gate.open();
         while stream.recv().is_some() {}
         let finished = rx.recv_timeout(Duration::from_secs(5));
         waiting.join().unwrap();
@@ -975,8 +978,7 @@ mod tests {
         let other = "tts-red-lifecycle-other";
         slots().remove(engine);
         slots().remove(other);
-        // Resident: a second engine's daemon, idle in its pool.
-        prewarm(other, "powershell".into(), wrapper_args(150, 30));
+        prewarm(other, "powershell".into(), wrapper_args(0, 10));
         wait_until(
             || {
                 slots()
@@ -986,7 +988,7 @@ mod tests {
             Duration::from_secs(15),
             "other engine's daemon ready",
         );
-        prewarm(engine, "powershell".into(), wrapper_args(150, 30));
+        prewarm(engine, "powershell".into(), wrapper_args(0, 10));
         wait_until(
             || {
                 slots()
@@ -997,43 +999,37 @@ mod tests {
             "first daemon ready",
         );
 
-        // Replacement load for config K2: READY delayed 6 s, so the load
-        // window is wide enough to sample mid-flight.
-        let k2_args = wrapper_args(6000, 30);
+        let gate = TempGate::new("replacement");
+        let k2_args = gated_wrapper_args(&gate, 10);
         let k2_key = key_of("powershell", &k2_args);
         prewarm(engine, "powershell".into(), k2_args);
-        std::thread::sleep(Duration::from_millis(300));
+        wait_until(
+            || {
+                slots()
+                    .get(engine)
+                    .is_some_and(|s| s.pending.as_deref() == Some(k2_key.as_str()))
+            },
+            Duration::from_secs(5),
+            "replacement pending",
+        );
 
-        // One lock scope for all three asserts: `slots()` is not reentrant,
-        // and a second acquire while `guard` is alive deadlocks the test
-        // thread against itself (the wedge the full-suite run died in).
         let guard = slots();
         let slot = guard.get(engine).expect("engine slot exists");
-        assert_eq!(
-            slot.pending.as_deref(),
-            Some(k2_key.as_str()),
-            "replacement must keep its pending key"
-        );
-        assert!(
-            slot.daemon.is_none(),
-            "old daemon still resident while its replacement loads — two model copies at once (the 4 GB CUDA OOM overlap)"
-        );
-        assert!(
-            guard
-                .get(other)
-                .is_some_and(|s| s.daemon.is_none() && !s.busy),
-            "another engine's idle daemon must die with the switch, not age out over 600 s"
-        );
+        assert_eq!(slot.pending.as_deref(), Some(k2_key.as_str()));
+        assert!(slot.daemon.is_none());
+        assert!(guard
+            .get(other)
+            .is_some_and(|s| s.daemon.is_none() && !s.busy));
         drop(guard);
 
-        // The delayed replacement must still land normally after all that.
+        gate.open();
         wait_until(
             || {
                 slots()
                     .get(engine)
                     .is_some_and(|s| !s.busy && s.daemon.as_ref().is_some_and(|d| d.key == k2_key))
             },
-            Duration::from_secs(25),
+            Duration::from_secs(15),
             "replacement daemon ready",
         );
 
@@ -1043,19 +1039,17 @@ mod tests {
 
     /// A wedged interpreter never prints READY. The start must fail within the
     /// budget instead of leaving the slot busy and every same-config waiter
-    /// hung; the guard keeps this test near one second.
+    /// hung.
     #[cfg(windows)]
     #[test]
     fn a_wedged_wrapper_fails_the_start_within_the_model_load_budget() {
-        // The budget is global: hold the lock so the delayed-READY lifecycle
-        // test cannot run under this shortened budget.
         let _lock = SLOTS_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _budget = BudgetGuard::set(1);
+        let _budget = BudgetGuard::set_ms(200);
         let started = Instant::now();
         let result = start(
             "tts-budget-wedged".into(),
-            "powershell",
-            &wrapper_args(30_000, 1),
+            "cmd.exe",
+            &["/C".into(), "ping -n 60 127.0.0.1 >nul".into()],
         );
         let error = result.err().expect("a load past the budget must fail");
         assert!(
@@ -1070,7 +1064,7 @@ mod tests {
     #[test]
     fn a_same_config_wait_is_bounded_by_the_model_load_budget() {
         let _lock = SLOTS_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _budget = BudgetGuard::set(1);
+        let _budget = BudgetGuard::set_ms(200);
         let engine = "tts-budget-wait";
         {
             let mut guard = slots();

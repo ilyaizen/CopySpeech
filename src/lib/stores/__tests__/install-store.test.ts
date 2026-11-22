@@ -38,15 +38,7 @@ it("refuses a second start while the engine is running and keeps the first run",
   expect(run?.voiceStatus.amy).toBe("installing");
 });
 
-it("allows a new start once a run has settled", async () => {
-  await installStore.start("store-test-settled", []);
-  emitProgress({ engine: "store-test-settled", done: true, exit_code: 0 });
-
-  expect(await installStore.start("store-test-settled", [])).toBe(true);
-  expect(installStore.isRunning("store-test-settled")).toBe(true);
-});
-
-it("a done event with exit 0 clears running and marks voices done", async () => {
+it("a done event with exit 0 clears running, marks voices done, and allows restart", async () => {
   await installStore.start("store-test-done", ["amy"]);
   emitProgress({ engine: "store-test-done", done: true, exit_code: 0 });
 
@@ -54,9 +46,12 @@ it("a done event with exit 0 clears running and marks voices done", async () => 
   expect(run?.running).toBe(false);
   expect(run?.exitCode).toBe(0);
   expect(run?.voiceStatus.amy).toBe("done");
+
+  expect(await installStore.start("store-test-done", [])).toBe(true);
+  expect(installStore.isRunning("store-test-done")).toBe(true);
 });
 
-it("fail settles a launch error: clears running, sets exit -1, fails pending voices", async () => {
+it("fail settles a launch error, fails pending voices, and allows retry", async () => {
   await installStore.start("store-test-fail", ["amy", "joe"]);
   installStore.fail("store-test-fail", "[ERROR] install did not start: boom");
 
@@ -65,12 +60,7 @@ it("fail settles a launch error: clears running, sets exit -1, fails pending voi
   expect(run?.exitCode).toBe(-1);
   expect(run?.lines).toEqual(["[ERROR] install did not start: boom"]);
   expect(run?.voiceStatus).toEqual({ amy: "failed", joe: "failed" });
-});
 
-it("a start after fail is allowed, so Retry is not blocked", async () => {
-  await installStore.start("store-test-retry", []);
-  installStore.fail("store-test-retry", "[ERROR] install did not start: boom");
-
-  expect(await installStore.start("store-test-retry", [])).toBe(true);
-  expect(installStore.isRunning("store-test-retry")).toBe(true);
+  expect(await installStore.start("store-test-fail", [])).toBe(true);
+  expect(installStore.isRunning("store-test-fail")).toBe(true);
 });

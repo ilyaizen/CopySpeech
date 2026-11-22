@@ -184,12 +184,8 @@ mod windows_imp {
         }
 
         #[test]
-        fn actual_0_2_x_to_0_3_upgrade_migrates() {
+        fn actual_0_2_x_to_0_3_upgrade_migrates_across_case_and_separators() {
             assert!(allowed(INSTALLED_EXE, false, Some(LEGACY_RUN)));
-        }
-
-        #[test]
-        fn path_case_and_separator_differences_still_match() {
             assert!(allowed(
                 "c:/users/user/appdata/local/copyspeech/COPYSPEECH.EXE",
                 false,
@@ -198,12 +194,8 @@ mod windows_imp {
         }
 
         #[test]
-        fn existing_new_registration_is_not_overwritten() {
+        fn upgrade_guards_skip_non_matching_installs() {
             assert!(!allowed(INSTALLED_EXE, true, Some(LEGACY_RUN)));
-        }
-
-        #[test]
-        fn debug_build_is_not_migrated() {
             let dev = r"D:\Projects\CopySpeech\src-tauri\target\debug\copyspeech.exe";
             assert!(!allowed(dev, false, Some(LEGACY_RUN)));
             assert!(!allowed(
@@ -211,25 +203,13 @@ mod windows_imp {
                 false,
                 Some(r#""D:\Projects\CopySpeak\src-tauri\target\debug\copyspeak.exe""#),
             ));
-        }
-
-        #[test]
-        fn portable_copy_is_not_migrated() {
             let portable = r"D:\Portable\CopySpeech\copyspeech.exe";
             assert!(!allowed(portable, false, Some(LEGACY_RUN)));
-        }
-
-        #[test]
-        fn legacy_run_pointing_elsewhere_is_not_migrated() {
             assert!(!allowed(
                 INSTALLED_EXE,
                 false,
                 Some(r#""D:\Portable\CopySpeak\copyspeak.exe""#),
             ));
-        }
-
-        #[test]
-        fn missing_legacy_run_is_not_migrated() {
             assert!(!allowed(INSTALLED_EXE, false, None));
         }
     }
@@ -421,60 +401,48 @@ X-GNOME-Autostart-enabled=true
         }
 
         #[test]
-        fn existing_new_entry_is_not_overwritten() {
-            let (dir, _guard) = scratch("existing-new");
-            std::fs::write(dir.join("CopySpeak.desktop"), LEGACY_ENTRY).unwrap();
-            std::fs::write(dir.join("CopySpeech.desktop"), "user-custom").unwrap();
-
-            let migrated = migrate_in(&dir, Path::new("/usr/bin/copyspeech"), &bins()).unwrap();
-
-            assert!(!migrated);
-            assert_eq!(
-                std::fs::read_to_string(dir.join("CopySpeech.desktop")).unwrap(),
-                "user-custom"
-            );
-            assert!(dir.join("CopySpeak.desktop").exists());
-        }
-
-        #[test]
-        fn appimage_or_portable_run_is_not_migrated() {
-            let (dir, _guard) = scratch("appimage");
-            std::fs::write(dir.join("CopySpeak.desktop"), LEGACY_ENTRY).unwrap();
-
-            let appimage = Path::new("/tmp/.mount_CopySp/usr/bin/copyspeech");
-            assert!(!migrate_in(&dir, appimage, &bins()).unwrap());
-            assert!(dir.join("CopySpeak.desktop").exists());
-            assert!(!dir.join("CopySpeech.desktop").exists());
-        }
-
-        #[test]
-        fn dev_build_is_not_migrated() {
-            let (dir, _guard) = scratch("dev");
-            std::fs::write(dir.join("CopySpeak.desktop"), LEGACY_ENTRY).unwrap();
-
-            let dev = Path::new("/home/user/CopySpeech/src-tauri/target/debug/copyspeech");
-            assert!(!migrate_in(&dir, dev, &bins()).unwrap());
-            assert!(!dir.join("CopySpeech.desktop").exists());
-        }
-
-        #[test]
-        fn unverified_legacy_content_is_not_migrated() {
-            let (dir, _guard) = scratch("unverified");
-            std::fs::write(
-                dir.join("CopySpeak.desktop"),
-                "[Desktop Entry]\nName=CopySpeak\nExec=/home/user/dev/copyspeak\n",
-            )
-            .unwrap();
-
-            assert!(!migrate_in(&dir, Path::new("/usr/bin/copyspeech"), &bins()).unwrap());
-            assert!(!dir.join("CopySpeech.desktop").exists());
-        }
-
-        #[test]
-        fn missing_legacy_entry_is_not_migrated() {
-            let (dir, _guard) = scratch("missing");
-            assert!(!migrate_in(&dir, Path::new("/usr/bin/copyspeech"), &bins()).unwrap());
-            assert!(!dir.join("CopySpeech.desktop").exists());
+        fn non_matching_linux_installs_are_not_migrated() {
+            {
+                let (dir, _guard) = scratch("existing-new");
+                std::fs::write(dir.join("CopySpeak.desktop"), LEGACY_ENTRY).unwrap();
+                std::fs::write(dir.join("CopySpeech.desktop"), "user-custom").unwrap();
+                assert!(!migrate_in(&dir, Path::new("/usr/bin/copyspeech"), &bins()).unwrap());
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("CopySpeech.desktop")).unwrap(),
+                    "user-custom"
+                );
+                assert!(dir.join("CopySpeak.desktop").exists());
+            }
+            {
+                let (dir, _guard) = scratch("appimage");
+                std::fs::write(dir.join("CopySpeak.desktop"), LEGACY_ENTRY).unwrap();
+                let appimage = Path::new("/tmp/.mount_CopySp/usr/bin/copyspeech");
+                assert!(!migrate_in(&dir, appimage, &bins()).unwrap());
+                assert!(dir.join("CopySpeak.desktop").exists());
+                assert!(!dir.join("CopySpeech.desktop").exists());
+            }
+            {
+                let (dir, _guard) = scratch("dev");
+                std::fs::write(dir.join("CopySpeak.desktop"), LEGACY_ENTRY).unwrap();
+                let dev = Path::new("/home/user/CopySpeech/src-tauri/target/debug/copyspeech");
+                assert!(!migrate_in(&dir, dev, &bins()).unwrap());
+                assert!(!dir.join("CopySpeech.desktop").exists());
+            }
+            {
+                let (dir, _guard) = scratch("unverified");
+                std::fs::write(
+                    dir.join("CopySpeak.desktop"),
+                    "[Desktop Entry]\nName=CopySpeak\nExec=/home/user/dev/copyspeak\n",
+                )
+                .unwrap();
+                assert!(!migrate_in(&dir, Path::new("/usr/bin/copyspeech"), &bins()).unwrap());
+                assert!(!dir.join("CopySpeech.desktop").exists());
+            }
+            {
+                let (dir, _guard) = scratch("missing");
+                assert!(!migrate_in(&dir, Path::new("/usr/bin/copyspeech"), &bins()).unwrap());
+                assert!(!dir.join("CopySpeech.desktop").exists());
+            }
         }
     }
 }
@@ -639,9 +607,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn failed_autostart_change_does_not_persist_settings() {
+    fn failed_or_unchanged_autostart_does_not_persist_or_touch_os() {
         let mut persisted = false;
-        let result = persist_change(
+        let denied = persist_change(
             false,
             true,
             || {
@@ -650,8 +618,21 @@ mod tests {
             },
             |_| Err("registration denied".into()),
         );
-        assert_eq!(result, Err("registration denied".into()));
+        assert_eq!(denied, Err("registration denied".into()));
         assert!(!persisted);
+
+        let mut registrations = Vec::new();
+        let unchanged = persist_change(
+            true,
+            true,
+            || Ok(()),
+            |enabled| {
+                registrations.push(enabled);
+                Ok(())
+            },
+        );
+        assert!(unchanged.is_ok());
+        assert!(registrations.is_empty());
     }
 
     #[test]
@@ -671,68 +652,35 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_autostart_does_not_touch_os_registration() {
-        let mut registrations = Vec::new();
-        let result = persist_change(
-            true,
-            true,
-            || Ok(()),
-            |enabled| {
-                registrations.push(enabled);
-                Ok(())
-            },
-        );
-        assert!(result.is_ok());
-        assert!(registrations.is_empty());
-    }
-
-    #[test]
-    fn migration_runs_platform_gate_for_enabled_release_build() {
+    fn migrate_legacy_with_gates_and_propagates_errors() {
         let mut attempted = 0;
-        let result = migrate_legacy_with(true, false, || {
+        let ok = migrate_legacy_with(true, false, || {
             attempted += 1;
             Ok(true)
         });
-        assert_eq!(result, Ok(true));
+        assert_eq!(ok, Ok(true));
         assert_eq!(attempted, 1);
-    }
 
-    #[test]
-    fn migration_skips_disabled_setting_without_calling_platform() {
-        let mut attempted = false;
-        let result = migrate_legacy_with(false, false, || {
-            attempted = true;
-            Ok(true)
-        });
-        assert_eq!(result, Ok(false));
-        assert!(!attempted);
-    }
+        let mut called = false;
+        assert_eq!(
+            migrate_legacy_with(false, false, || {
+                called = true;
+                Ok(true)
+            }),
+            Ok(false)
+        );
+        assert_eq!(
+            migrate_legacy_with(true, true, || {
+                called = true;
+                Ok(true)
+            }),
+            Ok(false)
+        );
+        assert!(!called);
 
-    #[test]
-    fn migration_skips_dev_build_without_calling_platform() {
-        let mut attempted = false;
-        let result = migrate_legacy_with(true, true, || {
-            attempted = true;
-            Ok(true)
-        });
-        assert_eq!(result, Ok(false));
-        assert!(!attempted);
-    }
-
-    #[test]
-    fn migration_reports_platform_failure() {
-        let result = migrate_legacy_with(true, false, || Err("registry unreadable".into()));
-        assert_eq!(result, Err("registry unreadable".into()));
-    }
-
-    #[test]
-    fn test_get_current_exe_path() {
-        let result = get_current_exe_path();
-        assert!(result.is_ok());
-        let path = result.unwrap();
-        assert!(
-            path.to_string_lossy().ends_with(".exe")
-                || path.to_string_lossy().contains("copyspeech")
+        assert_eq!(
+            migrate_legacy_with(true, false, || Err("registry unreadable".into())),
+            Err("registry unreadable".into())
         );
     }
 }

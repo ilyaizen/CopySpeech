@@ -8,12 +8,13 @@ import {
   spokenUntil
 } from "../captions";
 
-it("preserves multilingual text and punctuation while making short phrases", () => {
+it("preserves multilingual text and punctuation while splitting phrases at sentence marks", () => {
   for (const text of [
     "Hello, world! This is a longer sentence with several words to read aloud.",
     "שלום עולם! זה טקסט בעברית, עם סימני פיסוק.",
     "你好世界。这是一个测试。",
-    "  “Read this!” Then continue."
+    "  “Read this!” Then continue.",
+    "नमस्ते दुनिया। यह परीक्षण है।"
   ]) {
     const words = buildCaptions(text);
     expect(words.map((word) => word.text).join("")).toBe(text);
@@ -23,12 +24,9 @@ it("preserves multilingual text and punctuation while making short phrases", () 
       expect(group.map((word) => word.text).join("").length).toBeLessThanOrEqual(42);
     }
   }
-});
-
-it("starts a new phrase after a Devanagari danda", () => {
-  const words = buildCaptions("नमस्ते दुनिया। यह परीक्षण है।");
-  expect(words[0].phrase).toBe(0);
-  expect(words.find((word) => word.text.startsWith("यह"))?.phrase).toBe(1);
+  const hindi = buildCaptions("नमस्ते दुनिया। यह परीक्षण है।");
+  expect(hindi[0].phrase).toBe(0);
+  expect(hindi.find((word) => word.text.startsWith("यह"))?.phrase).toBe(1);
 });
 
 it("selects words at audio boundaries and safely handles missing timing", () => {
@@ -128,30 +126,22 @@ function perToken(text: string, msPerToken = 100) {
   };
 }
 
-it("highlights a contraction through its untimed apostrophe", () => {
-  // A per-token stream splits "don't" into "don" + "t". Requiring contiguous
-  // timing text dropped the whole word's timing and made the pill jump past
-  // it; a timing that starts inside the word's span belongs to the word.
-  const text = "don't stop; it's 3.14 approx.";
-  const words = buildCaptions(text, perToken(text));
-  expect(words.map((word) => word.text).join("")).toBe(text);
-  const contractionIndex = words.findIndex((word) => word.text.startsWith("don't"));
+it("maps every timed run onto the caption word containing it, including contractions", () => {
+  const contractionText = "don't stop; it's 3.14 approx.";
+  const contractionWords = buildCaptions(contractionText, perToken(contractionText));
+  expect(contractionWords.map((word) => word.text).join("")).toBe(contractionText);
+  const contractionIndex = contractionWords.findIndex((word) => word.text.startsWith("don't"));
   expect(contractionIndex).toBeGreaterThanOrEqual(0);
-  const contraction = words[contractionIndex];
-  expect(contraction.start).toBe(0);
-  expect(contraction.end).toBe(200);
-  expect(activeCaptionWord(words, 150)).toBe(contractionIndex);
-  // The next timed run ("stop") starts the caption word after it.
-  expect(activeCaptionWord(words, 250)).toBe(contractionIndex + 1);
-  const decimal = words.find((word) => word.text.startsWith("3.14"));
-  expect(decimal?.start).not.toBeNull();
-});
+  expect(contractionWords[contractionIndex].start).toBe(0);
+  expect(contractionWords[contractionIndex].end).toBe(200);
+  expect(activeCaptionWord(contractionWords, 150)).toBe(contractionIndex);
+  expect(activeCaptionWord(contractionWords, 250)).toBe(contractionIndex + 1);
+  expect(contractionWords.find((word) => word.text.startsWith("3.14"))?.start).not.toBeNull();
 
-it("maps every timed run onto the caption word containing it", () => {
   for (const text of [
     "Hello, world!",
     "well-known fact, tested.",
-    "don't stop; it's 3.14 approx.",
+    contractionText,
     "state of the art",
     "2026 was warm; 2027 will be warmer."
   ]) {

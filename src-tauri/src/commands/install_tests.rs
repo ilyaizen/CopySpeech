@@ -13,29 +13,23 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 #[test]
-fn find_uv_in_skips_missing_paths_and_folders() {
-    let root = scratch("skips");
-    let missing = root.join("missing").join("uv");
-    let folder_named_uv = root.join("folder").join("uv");
+fn find_uv_in_skips_non_files_and_finds_each_candidate() {
+    let skip_root = scratch("skips");
+    let missing = skip_root.join("missing").join("uv");
+    let folder_named_uv = skip_root.join("folder").join("uv");
     fs::create_dir_all(&folder_named_uv).unwrap();
-    let real = root.join("real").join("uv");
+    let real = skip_root.join("real").join("uv");
     fs::create_dir_all(real.parent().unwrap()).unwrap();
     fs::write(&real, b"").unwrap();
-
     assert_eq!(
         find_uv_in(&[missing, folder_named_uv, real.clone()]),
         Some(real)
     );
-    let _ = fs::remove_dir_all(&root);
-}
+    let _ = fs::remove_dir_all(&skip_root);
 
-#[test]
-fn each_candidate_under_temp_home_is_found_alone() {
     let root = scratch("each");
     let home = root.join("home");
     let local = root.join("local");
-    // Only candidates under the temp folders can be placed here. Absolute
-    // system paths such as /usr/bin/uv are covered by the parity test below.
     let placeable: Vec<PathBuf> = uv_candidates_in(Some(&home), Some(&local))
         .into_iter()
         .filter(|c| c.starts_with(&home) || c.starts_with(&local))
@@ -46,12 +40,7 @@ fn each_candidate_under_temp_home_is_found_alone() {
     for candidate in &placeable {
         fs::create_dir_all(candidate.parent().unwrap()).unwrap();
         fs::write(candidate, b"").unwrap();
-        assert_eq!(
-            find_uv_in(&placeable),
-            Some(candidate.clone()),
-            "candidate {}",
-            candidate.display()
-        );
+        assert_eq!(find_uv_in(&placeable), Some(candidate.clone()));
         fs::remove_file(candidate).unwrap();
     }
     let _ = fs::remove_dir_all(&root);

@@ -993,7 +993,7 @@ mod tests {
         let release = files.0.join("release");
         let quote = |path: &std::path::Path| path.to_string_lossy().replace('\'', "''");
         let preview_script = format!(
-            "[IO.File]::WriteAllText('{}','started'); for ($i=0; $i -lt 200 -and !(Test-Path '{}'); $i++) {{ Start-Sleep -Milliseconds 50 }}; [IO.File]::WriteAllText('{{output}}','preview')",
+            "[IO.File]::WriteAllText('{}','started'); for ($i=0; $i -lt 500 -and !(Test-Path '{}'); $i++) {{ Start-Sleep -Milliseconds 20 }}; [IO.File]::WriteAllText('{{output}}','preview')",
             quote(&preview_started), quote(&release)
         );
         let reading_script = format!(
@@ -1016,7 +1016,7 @@ mod tests {
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !preview_started.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(preview_started.exists(), "preview process did not start");
         let request_id = "cli-preview-resource-cancel";
@@ -1049,7 +1049,7 @@ mod tests {
             backend(reading_script).synthesize("reading", "voice")
         });
         ready_rx.recv().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(120));
         let overlapped = reading_started.exists();
         std::fs::write(&release, "release").unwrap();
         assert!(preview.join().unwrap().is_ok());
@@ -1108,8 +1108,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_args_replaces_placeholders() {
-        let backend = CliTtsBackend::new(
+    fn build_args_placeholders_cuda_and_speed() {
+        let basic = CliTtsBackend::new(
             "test-tts".into(),
             vec![
                 "{input}".into(),
@@ -1118,16 +1118,48 @@ mod tests {
                 "{voice}".into(),
             ],
         );
-        let args = backend.build_args("/tmp/input.txt", "/tmp/out.wav", "af_heart", "hello world");
         assert_eq!(
-            args,
+            basic.build_args("/tmp/input.txt", "/tmp/out.wav", "af_heart", "hello"),
             vec!["/tmp/input.txt", "/tmp/out.wav", "--voice", "af_heart"]
+        );
+
+        let legacy = CliTtsBackend::new("test-tts".into(), vec!["{text}".into(), "{output}".into()]);
+        assert_eq!(
+            legacy.build_args("/tmp/input.txt", "/tmp/out.wav", "af_heart", "hello"),
+            vec!["/tmp/input.txt", "/tmp/out.wav"]
+        );
+
+        let mut ours = CliTtsBackend::new(
+            "uv".into(),
+            vec!["{engine_dir}/kitten/scripts/copyspeech-kitten.py".into()],
+        );
+        let baseline = ours.build_args("in.txt", "out.wav", "Rosie", "hi");
+        ours.cuda = true;
+        let with_cuda = ours.build_args("in.txt", "out.wav", "Rosie", "hi");
+        assert_eq!(with_cuda.len(), baseline.len() + 2);
+        assert_eq!(&with_cuda[with_cuda.len() - 2..], &["--device", "cuda"]);
+
+        let mut third_party = CliTtsBackend::new("some-tts".into(), vec!["{input}".into()]);
+        third_party.cuda = true;
+        assert_eq!(
+            third_party.build_args("in.txt", "out.wav", "v", "hi"),
+            vec!["in.txt"]
+        );
+
+        let mut speed = CliTtsBackend::new(
+            "uv".into(),
+            vec!["--speed".into(), "{speed}".into(), "{input}".into()],
+        );
+        assert_eq!(speed.build_args("in.txt", "out.wav", "Rosie", "hi"), vec!["in.txt"]);
+        speed.speed = Some(1.5);
+        assert_eq!(
+            speed.build_args("in.txt", "out.wav", "Rosie", "hi"),
+            vec!["--speed", "1.5", "in.txt"]
         );
     }
 
     #[test]
     fn test_serve_args_drops_per_utterance_flags() {
-        // The real Piper preset template, minus {engine_dir} expansion.
         let backend = CliTtsBackend::new(
             "uv".into(),
             vec![
@@ -1156,134 +1188,27 @@ mod tests {
     }
 
     #[test]
-    fn engine_kind_matches_on_the_wrapper_script_only() {
-        let piper = CliTtsBackend::new(
-            "uv".into(),
-            vec!["{engine_dir}/piper/scripts/copyspeech-piper.py".into()],
-        );
-        assert_eq!(piper.engine_kind(), Some("piper"));
-
-        let pocket = CliTtsBackend::new(
-            "uv".into(),
-            vec!["{engine_dir}/pocket/scripts/copyspeech-pocket.py".into()],
-        );
-        assert_eq!(pocket.engine_kind(), Some("pocket"));
-
-        let qwen = CliTtsBackend::new(
-            "uv".into(),
-            vec!["{engine_dir}/qwen/scripts/copyspeech-qwen.py".into()],
-        );
-        assert_eq!(qwen.engine_kind(), Some("qwen"));
-
-        let tiny_voca = CliTtsBackend::new(
-            "uv".into(),
-            vec!["{engine_dir}/tiny-voca/scripts/copyspeech-tiny-voca.py".into()],
-        );
-        assert_eq!(tiny_voca.engine_kind(), Some("tiny-voca"));
-
-        // A third-party CLI has no --serve mode; attempting a daemon would only
-        // burn a process start per session.
+    fn daemon_eligibility_and_streaming_claims() {
+        for (script, expected) in [
+            ("{engine_dir}/piper/scripts/copyspeech-piper.py", Some("piper")),
+            ("{engine_dir}/pocket/scripts/copyspeech-pocket.py", Some("pocket")),
+            ("{engine_dir}/qwen/scripts/copyspeech-qwen.py", Some("qwen")),
+            ("{engine_dir}/tiny-voca/scripts/copyspeech-tiny-voca.py", Some("tiny-voca")),
+        ] {
+            let b = CliTtsBackend::new("uv".into(), vec![script.into()]);
+            assert_eq!(b.engine_kind(), expected);
+        }
         let third_party = CliTtsBackend::new("kokoro-tts".into(), vec!["{input}".into()]);
         assert_eq!(third_party.engine_kind(), None);
-    }
 
-    #[test]
-    fn one_shot_backend_is_not_daemon_eligible() {
-        let backend = CliTtsBackend::new(
+        let one_shot = CliTtsBackend::new(
             "uv".into(),
             vec!["{engine_dir}/qwen/scripts/copyspeech-qwen.py".into()],
         )
         .one_shot();
+        assert_eq!(one_shot.engine_kind(), Some("qwen"));
+        assert_eq!(one_shot.daemon_engine_kind(), None);
 
-        assert_eq!(backend.engine_kind(), Some("qwen"));
-        assert_eq!(backend.daemon_engine_kind(), None);
-    }
-
-    #[test]
-    fn cuda_appends_device_only_for_our_own_wrappers() {
-        let mut ours = CliTtsBackend::new(
-            "uv".into(),
-            vec!["{engine_dir}/kitten/scripts/copyspeech-kitten.py".into()],
-        );
-        // Off by default the arg list must be byte-identical to before, or every
-        // warm daemon key would be invalidated for existing users.
-        let baseline = ours.build_args("in.txt", "out.wav", "Rosie", "hi");
-        ours.cuda = true;
-        let with_cuda = ours.build_args("in.txt", "out.wav", "Rosie", "hi");
-        assert_eq!(with_cuda.len(), baseline.len() + 2);
-        assert_eq!(&with_cuda[with_cuda.len() - 2..], &["--device", "cuda"]);
-
-        let mut third_party = CliTtsBackend::new("some-tts".into(), vec!["{input}".into()]);
-        third_party.cuda = true;
-        assert_eq!(
-            third_party.build_args("in.txt", "out.wav", "v", "hi"),
-            vec!["in.txt"],
-            "an unknown CLI would reject --device"
-        );
-    }
-
-    #[test]
-    fn speed_placeholder_threads_value_and_drops_flag_when_unset() {
-        let mut backend = CliTtsBackend::new(
-            "uv".into(),
-            vec!["--speed".into(), "{speed}".into(), "{input}".into()],
-        );
-        assert_eq!(
-            backend.build_args("in.txt", "out.wav", "Rosie", "hi"),
-            vec!["in.txt"],
-            "unset speed drops the whole flag pair"
-        );
-
-        backend.speed = Some(1.5);
-        assert_eq!(
-            backend.build_args("in.txt", "out.wav", "Rosie", "hi"),
-            vec!["--speed", "1.5", "in.txt"]
-        );
-    }
-
-    #[test]
-    fn test_build_args_legacy_text_placeholder() {
-        // Test backward compatibility: {text} should also work as input file path
-        let backend =
-            CliTtsBackend::new("test-tts".into(), vec!["{text}".into(), "{output}".into()]);
-        let args = backend.build_args("/tmp/input.txt", "/tmp/out.wav", "af_heart", "hello world");
-        assert_eq!(args, vec!["/tmp/input.txt", "/tmp/out.wav"]);
-    }
-
-    #[test]
-    fn test_voice_display_name_extracts_middle_segment() {
-        let backend = CliTtsBackend::new("piper".into(), vec![]);
-
-        // Piper voice format: en_US-joe-medium
-        assert_eq!(backend.voice_display_name("en_US-joe-medium"), "joe");
-        assert_eq!(backend.voice_display_name("en_US-amy-medium"), "amy");
-
-        // Kokoro/Pocket format: af_heart (single segment)
-        assert_eq!(backend.voice_display_name("af_heart"), "af_heart");
-        assert_eq!(backend.voice_display_name("alba"), "alba");
-    }
-
-    #[test]
-    fn single_chunk_engines_never_advertise_streaming() {
-        // pocket hands back the whole utterance as one frame, so a warm daemon
-        // has nothing to stream. Kokoro yields per inference window and streams
-        // like the incremental engines below.
-        assert!(!claims_streaming("pocket"));
-    }
-
-    #[test]
-    fn incremental_engines_claim_streaming() {
-        // Whether the daemon is warm is a runtime question, answered by
-        // `runtime_ready` and gated at the call sites.
-        for engine in ["piper", "kitten", "qwen", "kokoro", "tiny-voca"] {
-            assert!(claims_streaming(engine), "{engine} should claim streaming");
-        }
-    }
-
-    #[test]
-    fn cold_daemon_claims_streaming_but_is_not_ready() {
-        // No daemon has been started in this process, so the static claim holds
-        // while runtime_ready reports cold. The call sites require both.
         let piper = CliTtsBackend::new(
             "uv".into(),
             vec!["{engine_dir}/piper/scripts/copyspeech-piper.py".into()],

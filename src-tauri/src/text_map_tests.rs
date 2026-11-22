@@ -22,7 +22,7 @@ fn highlight(source: &str, spoken: &str, word: &str, occurrence: usize) -> Optio
 }
 
 #[test]
-fn plain_whitespace_collapse_maps_every_word() {
+fn whitespace_collapse_and_repeated_words_map_each_occurrence() {
     let source = "First para.\n\nSecond one here.";
     let spoken = "First para. Second one here.";
     assert_eq!(
@@ -33,6 +33,10 @@ fn plain_whitespace_collapse_maps_every_word() {
         highlight(source, spoken, "First", 0).as_deref(),
         Some("First")
     );
+
+    let repeated = align("buffalo buffalo\nbuffalo", "buffalo buffalo buffalo");
+    assert_eq!(repeated.source_span_utf16(16, 23), Some((16, 23)));
+    assert_eq!(repeated.source_span_utf16(0, 7), Some((0, 7)));
 }
 
 /// The live 2026-09-10 failure: one `%` in a 1,944-character selection
@@ -86,15 +90,6 @@ fn same_length_folds_still_map_to_the_raw_form() {
         highlight("The \u{0441}at sat", "The cat sat", "cat", 0).as_deref(),
         Some("\u{0441}at")
     );
-}
-
-#[test]
-fn repeated_words_map_to_their_own_occurrence() {
-    let source = "buffalo buffalo\nbuffalo";
-    let spoken = "buffalo buffalo buffalo";
-    let alignment = align(source, spoken);
-    assert_eq!(alignment.source_span_utf16(16, 23), Some((16, 23)));
-    assert_eq!(alignment.source_span_utf16(0, 7), Some((0, 7)));
 }
 
 #[test]
@@ -180,57 +175,34 @@ fn unrecoverable_divergence_falls_back_to_the_remaining_passage() {
     assert_eq!(utf16_slice(source, (start, end)), "bravo charlie delta");
 }
 
-/// Widening gives each projected word the non-speech characters attached to
-/// it: gaps between words ride with the word before them, the text's opening
-/// characters ride with the first word, and whitespace separates the spans.
 #[test]
-fn widen_word_span_covers_attached_punctuation_without_stealing_words() {
-    let raw_str = "Hello, world! Really.";
-    let raw: Vec<u16> = raw_str.encode_utf16().collect();
-    let wide = |span: Span| utf16_slice(raw_str, widen_word_span(&raw, span));
-    assert_eq!(wide((0, 5)), "Hello,");
-    assert_eq!(wide((7, 12)), "world!");
-    assert_eq!(wide((14, 20)), "Really.");
-    // An opening quote before the first word belongs to it.
-    let raw_str = "\"read this,\" he said";
-    let quoted: Vec<u16> = raw_str.encode_utf16().collect();
-    let wide = |span: Span| utf16_slice(raw_str, widen_word_span(&quoted, span));
-    assert_eq!(wide((1, 5)), "\"read");
-    // The comma and the closing quote both sit flush after "this".
-    assert_eq!(wide((6, 10)), "this,\"");
-    assert_eq!(wide((13, 15)), "he");
-}
+fn widen_word_span_handles_punctuation_whitespace_surrogates_and_cjk() {
+    let wide_of = |raw_str: &str, span: Span| {
+        let raw: Vec<u16> = raw_str.encode_utf16().collect();
+        utf16_slice(raw_str, widen_word_span(&raw, span))
+    };
 
-#[test]
-fn widen_word_span_stops_at_whitespace_and_keeps_surrogate_pairs_whole() {
-    // A whitespace-flanked gap belongs to the word before it, so an em dash
-    // between words rides with "one" and "two" starts clean.
-    let raw_str = "one — two";
-    let raw: Vec<u16> = raw_str.encode_utf16().collect();
-    let wide = |span: Span| utf16_slice(raw_str, widen_word_span(&raw, span));
-    assert_eq!(wide((0, 3)), "one —");
-    assert_eq!(wide((6, 9)), "two");
-    // An emoji after a word is attached punctuation; neither half of the
-    // surrogate pair may split off, and the span stays a char boundary.
-    let raw_str = "nice \u{1F44D} work";
-    let raw: Vec<u16> = raw_str.encode_utf16().collect();
-    let wide = |span: Span| utf16_slice(raw_str, widen_word_span(&raw, span));
-    assert_eq!(wide((0, 4)), "nice \u{1F44D}");
-    assert_eq!(wide((8, 12)), "work");
-}
+    let punct = "Hello, world! Really.";
+    assert_eq!(wide_of(punct, (0, 5)), "Hello,");
+    assert_eq!(wide_of(punct, (7, 12)), "world!");
+    assert_eq!(wide_of(punct, (14, 20)), "Really.");
 
-#[test]
-fn widen_word_span_covers_cjk_and_trailing_symbols() {
-    // Fullwidth punctuation is not alphanumeric, so the gap rides with the
-    // word before it; the final word keeps its closing mark.
-    let raw_str = "你好，世界！";
-    let raw: Vec<u16> = raw_str.encode_utf16().collect();
-    let wide = |span: Span| utf16_slice(raw_str, widen_word_span(&raw, span));
-    assert_eq!(wide((0, 2)), "你好，");
-    assert_eq!(wide((3, 5)), "世界！");
-    // Symbols after the last word, with no later word to stop at.
-    let raw_str = "end...";
-    let raw: Vec<u16> = raw_str.encode_utf16().collect();
-    let wide = |span: Span| utf16_slice(raw_str, widen_word_span(&raw, span));
-    assert_eq!(wide((0, 3)), "end...");
+    let quoted = "\"read this,\" he said";
+    assert_eq!(wide_of(quoted, (1, 5)), "\"read");
+    assert_eq!(wide_of(quoted, (6, 10)), "this,\"");
+    assert_eq!(wide_of(quoted, (13, 15)), "he");
+
+    let dash = "one — two";
+    assert_eq!(wide_of(dash, (0, 3)), "one —");
+    assert_eq!(wide_of(dash, (6, 9)), "two");
+
+    let emoji = "nice \u{1F44D} work";
+    assert_eq!(wide_of(emoji, (0, 4)), "nice \u{1F44D}");
+    assert_eq!(wide_of(emoji, (8, 12)), "work");
+
+    let cjk = "你好，世界！";
+    assert_eq!(wide_of(cjk, (0, 2)), "你好，");
+    assert_eq!(wide_of(cjk, (3, 5)), "世界！");
+
+    assert_eq!(wide_of("end...", (0, 3)), "end...");
 }

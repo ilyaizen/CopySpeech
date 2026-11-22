@@ -392,39 +392,29 @@ mod tests {
     }
 
     #[test]
-    fn body_pins_language_output_format_and_timestamps() {
+    fn request_body_sets_voice_speed_and_timestamp_defaults() {
         let body = backend("eve").request_body("hello");
         assert_eq!(body["text"], "hello");
         assert_eq!(body["language"], "auto");
         assert_eq!(body["with_timestamps"], true);
         assert_eq!(body["output_format"]["codec"], "wav");
         assert_eq!(body["output_format"]["sample_rate"], 24000);
-    }
+        assert!(body.get("speed").is_none());
 
-    #[test]
-    fn body_omits_voice_id_for_the_default_voice() {
         // Empty voice = the API's own default (`eve`); sending it blank would
         // ask for a voice with an empty id.
-        let body = backend("").request_body("hello");
-        assert!(body.get("voice_id").is_none());
-        let body = backend("ara").request_body("hello");
-        assert_eq!(body["voice_id"], "ara");
-    }
+        assert!(backend("").request_body("hello").get("voice_id").is_none());
+        assert_eq!(backend("ara").request_body("hello")["voice_id"], "ara");
 
-    #[test]
-    fn speed_is_omitted_when_unset_and_clamped_when_set() {
-        assert!(backend("eve").request_body("hi").get("speed").is_none());
-        let body = backend("eve").request_body("hi");
-        let backend = XaiTtsBackend::new(XaiConfig {
+        let fast = XaiTtsBackend::new(XaiConfig {
             speed: Some(2.5),
             ..Default::default()
         });
-        assert_eq!(backend.request_body("hi")["speed"], serde_json::json!(1.5));
-        let _ = body;
+        assert_eq!(fast.request_body("hi")["speed"], serde_json::json!(1.5));
     }
 
     #[test]
-    fn timestamps_bucket_into_ordered_valid_words() {
+    fn captions_from_timestamps_buckets_words_and_decodes_unaligned_envelopes() {
         let chars: Vec<String> = "Hello, world!".chars().map(String::from).collect();
         let times: Vec<GraphTime> = (0..chars.len())
             .map(|i| GraphTime::Object {
@@ -434,29 +424,30 @@ mod tests {
             .collect();
         let captions = captions_from_timestamps(&chars, &times).expect("valid alignment");
         captions.validate().unwrap();
-        let words = ["Hello", "world"];
-        assert_eq!(captions.words.len(), words.len());
+        assert_eq!(captions.words.len(), 2);
         assert_eq!(captions.words[0].start_ms, 0.0);
         // Tokens are alphanumeric runs: "Hello" spans chars 0..=4 and ends
         // where the last covered char (o) ends; the comma is no token.
         assert!((captions.words[0].end_ms - 250.0).abs() < 1e-9);
         assert_eq!(captions.words[1].text_start, 7);
-    }
 
-    #[test]
-    fn pair_form_of_graph_times_is_accepted() {
-        let chars: Vec<String> = vec!["H".into(), "i".into()];
-        let times = vec![GraphTime::Pair([0.0, 0.1]), GraphTime::Pair([0.1, 0.2])];
-        let captions = captions_from_timestamps(&chars, &times).expect("pair form parses");
+        let pair_chars: Vec<String> = vec!["H".into(), "i".into()];
+        let pair_times = vec![GraphTime::Pair([0.0, 0.1]), GraphTime::Pair([0.1, 0.2])];
+        let pair_captions =
+            captions_from_timestamps(&pair_chars, &pair_times).expect("pair form parses");
         // "Hi" is one token covering both chars: it ends where i ends.
-        assert_eq!(captions.words[0].end_ms, 200.0);
-    }
+        assert_eq!(pair_captions.words[0].end_ms, 200.0);
 
-    #[test]
-    fn disagreeing_arrays_yield_no_captions() {
-        let chars = vec!["H".to_string()];
-        let times: Vec<GraphTime> = Vec::new();
-        assert!(captions_from_timestamps(&chars, &times).is_none());
+        assert!(captions_from_timestamps(&["H".to_string()], &[]).is_none());
+
+        let wire = serde_json::json!({
+            "audio": STANDARD.encode(b"RIFF----"),
+            "content_type": "audio/wav",
+            "duration": 0.5
+        });
+        let envelope: TtsEnvelope = serde_json::from_value(wire).unwrap();
+        assert!(envelope.audio_timestamps.is_none());
+        assert_eq!(STANDARD.decode(envelope.audio).unwrap(), b"RIFF----");
     }
 
     #[test]
@@ -489,17 +480,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn envelope_without_timestamps_still_decodes_audio() {
-        let wire = serde_json::json!({
-            "audio": STANDARD.encode(b"RIFF----"),
-            "content_type": "audio/wav",
-            "duration": 0.5
-        });
-        let envelope: TtsEnvelope = serde_json::from_value(wire).unwrap();
-        assert!(envelope.audio_timestamps.is_none());
-        assert_eq!(STANDARD.decode(envelope.audio).unwrap(), b"RIFF----");
-    }
 
     /// Live synthesis against api.x.ai on the default voice. Opt-in: needs
     /// `XAI_API_KEY` in the environment (e.g. exported from

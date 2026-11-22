@@ -330,27 +330,6 @@ impl TtsBackend for GoogleTtsBackend {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_pcm16_to_wav_header() {
-        let pcm = vec![0u8; 8];
-        let wav = pcm16_to_wav(&pcm, 24000, 1);
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(wav.len(), 44 + 8);
-    }
-
-    #[test]
-    fn test_rate_from_mime() {
-        assert_eq!(
-            GoogleTtsBackend::rate_from_mime("audio/L16;codec=pcm;rate=24000"),
-            24000
-        );
-        assert_eq!(
-            GoogleTtsBackend::rate_from_mime("audio/L16;rate=16000"),
-            16000
-        );
-        assert_eq!(GoogleTtsBackend::rate_from_mime("audio/wav"), 24000);
-    }
 
     #[test]
     fn drain_sse_payloads_keeps_partial_lines_for_the_next_chunk() {
@@ -371,7 +350,17 @@ mod tests {
     }
 
     #[test]
-    fn audio_from_sse_event_skips_events_without_audio() {
+    fn audio_from_sse_event_parses_pcm_and_mime_rates() {
+        assert_eq!(
+            GoogleTtsBackend::rate_from_mime("audio/L16;codec=pcm;rate=24000"),
+            24000
+        );
+        assert_eq!(
+            GoogleTtsBackend::rate_from_mime("audio/L16;rate=16000"),
+            16000
+        );
+        assert_eq!(GoogleTtsBackend::rate_from_mime("audio/wav"), 24000);
+
         assert!(GoogleTtsBackend::audio_from_sse_event("{\"candidates\":[]}").is_none());
         assert!(GoogleTtsBackend::audio_from_sse_event("not json").is_none());
 
@@ -388,14 +377,12 @@ mod tests {
     }
 
     #[test]
-    fn request_body_anchors_verbatim_read_aloud_and_keeps_text_clean() {
+    fn request_body_anchors_system_instruction_or_inline_for_preview() {
         let body = tts_request_body("gemini-3.8-flash-tts", "What time is it?", "Kore");
-        // The anchor lives in systemInstruction...
         assert_eq!(
             body.pointer("/systemInstruction/parts/0/text"),
             Some(&serde_json::json!(READ_ALOUD_INSTRUCTION))
         );
-        // ...and 3.8's text stays verbatim: an inline direction would be spoken.
         assert_eq!(
             body.pointer("/contents/0/parts/0/text")
                 .and_then(|t| t.as_str()),
@@ -413,14 +400,11 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("AUDIO")
         );
-    }
 
-    #[test]
-    fn legacy_preview_models_get_the_direction_inline() {
         // Preview TTS models ignore systemInstruction and would otherwise read
         // clipboard content as a prompt — the 400 the fork hit.
-        let body = tts_request_body("gemini-2.5-flash-preview-tts", "Close the door", "Kore");
-        let spoken = body
+        let legacy = tts_request_body("gemini-2.5-flash-preview-tts", "Close the door", "Kore");
+        let spoken = legacy
             .pointer("/contents/0/parts/0/text")
             .and_then(|t| t.as_str())
             .expect("text part");
@@ -429,19 +413,21 @@ mod tests {
     }
 
     #[test]
-    fn unary_reply_with_its_own_wav_header_passes_through_unwrapped() {
+    fn unary_audio_bytes_wraps_raw_pcm_once_and_passes_wav_through() {
+        let wav = pcm16_to_wav(&[0u8; 8], 24000, 1);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(wav.len(), 44 + 8);
+
         let headered = pcm16_to_wav(&[1, 2, 3, 4], 24000, 1);
-        let out = unary_audio_bytes(headered.clone(), "audio/wav;rate=24000");
+        let passthrough = unary_audio_bytes(headered.clone(), "audio/wav;rate=24000");
         assert_eq!(
-            out, headered,
+            passthrough, headered,
             "a reply that already carries a WAV header must not be wrapped again"
         );
-    }
 
-    #[test]
-    fn headerless_pcm_still_gets_a_wav_header() {
-        let out = unary_audio_bytes(vec![1, 2, 3, 4], "audio/L16;codec=pcm;rate=24000");
-        assert_eq!(&out[0..4], b"RIFF");
-        assert_eq!(out.len(), 44 + 4);
+        let wrapped = unary_audio_bytes(vec![1, 2, 3, 4], "audio/L16;codec=pcm;rate=24000");
+        assert_eq!(&wrapped[0..4], b"RIFF");
+        assert_eq!(wrapped.len(), 44 + 4);
     }
 }

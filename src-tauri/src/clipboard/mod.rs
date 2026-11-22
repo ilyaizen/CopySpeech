@@ -246,8 +246,10 @@ impl ClipboardState {
 
     /// Returns true if this clipboard change should trigger TTS.
     fn on_change(&mut self, new_text: &str, trigger_window_ms: u64) -> bool {
-        let now = Instant::now();
+        self.on_change_at(new_text, trigger_window_ms, Instant::now())
+    }
 
+    fn on_change_at(&mut self, new_text: &str, trigger_window_ms: u64, now: Instant) -> bool {
         // 1. Debounce rapid OS events
         // Windows often fires multiple WM_CLIPBOARDUPDATE events within a few milliseconds
         // for a single Ctrl+C user action (e.g., when adding multiple formats).
@@ -349,73 +351,53 @@ fn truncate_at_word_boundary(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
-    fn test_double_copy_triggers() {
+    fn double_copy_debounce_trigger_rearm_and_expiry() {
         let mut state = ClipboardState::new();
-        // First copy — arms the state
-        assert!(!state.on_change("hello", 800));
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        // Same text within window — should trigger
-        assert!(state.on_change("hello", 800));
+        let t0 = Instant::now();
+        assert!(!state.on_change_at("hello", 800, t0));
+        // Within 50 ms OS debounce window: ignored.
+        assert!(!state.on_change_at("hello", 800, t0 + Duration::from_millis(10)));
+        // Same text within trigger window: fires and consumes the arm.
+        assert!(state.on_change_at("hello", 800, t0 + Duration::from_millis(60)));
+        // 3rd copy re-arms instead of re-triggering.
+        assert!(!state.on_change_at("hello", 800, t0 + Duration::from_millis(120)));
+        // 4th copy triggers again.
+        assert!(state.on_change_at("hello", 800, t0 + Duration::from_millis(180)));
+        // Re-arm and expire past window.
+        assert!(!state.on_change_at("hello", 800, t0 + Duration::from_millis(240)));
+        assert!(!state.on_change_at("hello", 800, t0 + Duration::from_millis(1100)));
     }
 
     #[test]
-    fn test_different_text_resets() {
-        let mut state = ClipboardState::new();
-        assert!(!state.on_change("hello", 800));
-        assert!(!state.on_change("world", 800));
+    fn different_text_resets_arm() {
+        let t0 = Instant::now();
+        let mut cleared = ClipboardState::new();
+        assert!(!cleared.on_change_at("hello", 800, t0));
+        assert!(!cleared.on_change_at("world", 800, t0 + Duration::from_millis(60)));
+        assert!(!cleared.on_change_at("hello", 800, t0 + Duration::from_millis(120)));
+
+        let mut rearmed = ClipboardState::new();
+        assert!(!rearmed.on_change_at("hello", 800, t0));
+        assert!(!rearmed.on_change_at("world", 800, t0 + Duration::from_millis(60)));
+        assert!(rearmed.on_change_at("world", 800, t0 + Duration::from_millis(120)));
     }
 
     #[test]
-    fn test_second_double_copy_after_trigger_does_not_retrigger() {
-        let mut state = ClipboardState::new();
-        // Shift time artificially using sleep since we use actual time
-
-        // 1st copy
-        assert!(!state.on_change("hello", 800));
-        std::thread::sleep(std::time::Duration::from_millis(60));
-
-        // 2nd copy -> Triggers!
-        assert!(state.on_change("hello", 800));
-        std::thread::sleep(std::time::Duration::from_millis(60));
-
-        // 3rd copy -> State was consumed, so this is treated as the start of a NEW double copy.
-        assert!(!state.on_change("hello", 800));
-
-        std::thread::sleep(std::time::Duration::from_millis(60));
-
-        // 4th copy -> Triggers again!
-        assert!(state.on_change("hello", 800));
-    }
-
-    #[test]
-    fn test_truncate_keeps_words_whole() {
+    fn truncate_keeps_words_whole_and_non_empty() {
         assert_eq!(
             truncate_at_word_boundary("alpha beta gamma delta", 12),
             "alpha beta"
         );
-        // No boundary to snap to: hard cap so content is still produced.
-        assert_eq!(truncate_at_word_boundary("abcdefghijkl", 5), "abcde");
-        // At or under the limit is returned untouched.
-        assert_eq!(truncate_at_word_boundary("short", 10), "short");
-    }
-
-    #[test]
-    fn test_truncate_keeps_a_complete_word_ending_at_the_cap() {
-        // The cap lands exactly at the end of a word followed by a space, so the
-        // whole valid prefix is kept instead of backing up to an earlier space.
         assert_eq!(
             truncate_at_word_boundary("alpha beta gamma", 10),
             "alpha beta"
         );
-        // Cap mid-word still backs up to the previous boundary.
         assert_eq!(truncate_at_word_boundary("alpha beta gamma", 9), "alpha");
-    }
-
-    #[test]
-    fn test_truncate_never_returns_empty_for_real_content() {
-        // Single long word, and a word whose only whitespace is at index 0.
+        assert_eq!(truncate_at_word_boundary("abcdefghijkl", 5), "abcde");
+        assert_eq!(truncate_at_word_boundary("short", 10), "short");
         assert!(!truncate_at_word_boundary("supercalifragilistic", 4).is_empty());
         assert!(!truncate_at_word_boundary(" leading", 1).is_empty());
     }

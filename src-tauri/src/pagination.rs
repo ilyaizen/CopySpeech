@@ -49,24 +49,6 @@ impl TextFragment {
             source_end,
         }
     }
-
-    /// Returns true if this is the first fragment.
-    #[allow(dead_code)]
-    pub fn is_first(&self) -> bool {
-        self.index == 0
-    }
-
-    /// Returns true if this is the last fragment.
-    #[allow(dead_code)]
-    pub fn is_last(&self) -> bool {
-        self.index == self.total - 1
-    }
-
-    /// Returns a formatted label like "Part 1 of 3".
-    #[allow(dead_code)]
-    pub fn label(&self) -> String {
-        format!("Part {} of {}", self.index + 1, self.total)
-    }
 }
 
 /// Sentence boundary position in text.
@@ -523,54 +505,6 @@ pub fn should_paginate(text: &str, config: &PaginationConfig) -> bool {
         return false;
     }
     text.chars().count() > config.fragment_size as usize
-}
-
-/// Get the number of fragments that would be created for the given text.
-#[allow(dead_code)]
-pub fn estimate_fragment_count(text: &str, config: &PaginationConfig) -> usize {
-    if !config.enabled || text.is_empty() {
-        return 1;
-    }
-
-    let max_size = config.fragment_size as usize;
-    let text_len = text.chars().count();
-
-    if text_len <= max_size {
-        return 1;
-    }
-
-    // Estimate based on sentence boundaries
-    let boundaries = detect_sentence_boundaries(text);
-    if boundaries.is_empty() {
-        return (text_len + max_size - 1) / max_size; // Ceiling division
-    }
-
-    // Count how many fragments would be created (mirrors paginate_text logic)
-    let mut count = 1;
-    let mut fragment_start = 0;
-
-    for (idx, boundary) in boundaries.iter().enumerate() {
-        let sentence_end = boundary.position + 1;
-        let current_fragment_len = sentence_end - fragment_start;
-
-        if current_fragment_len > max_size {
-            if idx > 0 {
-                let prev_end = boundaries[idx - 1].position + 1;
-                if prev_end > fragment_start {
-                    count += 1;
-                    fragment_start = prev_end;
-                }
-            }
-
-            let lone_len = sentence_end - fragment_start;
-            if lone_len > max_size {
-                count += (lone_len + max_size - 1) / max_size - 1;
-                fragment_start = sentence_end;
-            }
-        }
-    }
-
-    count
 }
 
 #[cfg(test)]

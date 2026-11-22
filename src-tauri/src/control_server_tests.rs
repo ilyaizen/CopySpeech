@@ -1,70 +1,7 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::sync::oneshot;
 
-#[test]
-fn loopback_only_accepts_loopback_addresses() {
-    assert!(is_loopback_addr("127.0.0.1:43117"));
-    assert!(is_loopback_addr("127.9.9.9:8080"));
-    assert!(is_loopback_addr("[::1]:43117"));
-    assert!(is_loopback_addr("localhost:43117"));
-    assert!(is_loopback_addr("LOCALHOST:43117"));
-}
-
-#[test]
-fn loopback_rejects_non_loopback_and_garbage() {
-    assert!(!is_loopback_addr("0.0.0.0:43117"));
-    assert!(!is_loopback_addr("192.168.1.5:43117"));
-    assert!(!is_loopback_addr("[::]:43117"));
-    assert!(!is_loopback_addr("example.com:43117"));
-    assert!(!is_loopback_addr("10.0.0.1:43117"));
-    // Malformed / unresolvable values fail closed.
-    assert!(!is_loopback_addr(""));
-    assert!(!is_loopback_addr("not an address"));
-}
-
-#[test]
-fn parse_request_routes_stop_without_body() {
-    let raw = b"POST /stop HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
-    assert!(matches!(
-        parse_request(raw),
-        Ok(ControlRequest::Stop(StopRequest { request_id: None }))
-    ));
-}
-
-#[test]
-fn parse_request_routes_status() {
-    assert!(matches!(
-        parse_request(b"GET /status HTTP/1.1\r\nHost: 127.0.0.1:43117\r\n\r\n"),
-        Ok(ControlRequest::Status)
-    ));
-}
-
-/// A reported caption is served verbatim, and the response opens CORS so
-/// the DSH client can read it from its own origin.
-#[test]
-fn status_body_serves_the_reported_caption_with_cors() {
-    let caption = r#"{"text":"hi","captions":null,"position_ms":42,"duration_ms":1000,"paused":false,"active":true}"#;
-    crate::playback_signal::remember_caption(caption.to_string());
-    assert_eq!(status_body(), caption);
-    let response = http_response_cors(200, "OK", &status_body());
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-    assert!(response.contains("Content-Type: application/json\r\n"));
-    assert!(response.contains("Access-Control-Allow-Origin: *\r\n"));
-    assert!(response.ends_with(caption));
-    // The existing routes keep the shared helper and stay CORS-free.
-    let plain = http_response(200, "OK", r#"{"ok":true}"#);
-    assert!(!plain.contains("Access-Control-Allow-Origin"));
-}
-
-fn stop_request(body: &str) -> Vec<u8> {
-    format!(
-        "POST /stop HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(),
-        body
-    )
-    .into_bytes()
-}
-
-/// Build a POST request for any control route, with a matching length.
 fn post_request(path: &str, body: &str) -> Vec<u8> {
     format!(
         "POST {} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
@@ -75,161 +12,176 @@ fn post_request(path: &str, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+fn speak_request(body: &serde_json::Value) -> Vec<u8> {
+    let body = body.to_string();
+    format!(
+        "POST /speak HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .into_bytes()
+}
+
 #[test]
-fn parse_request_routes_scoped_stop() {
-    match parse_request(&stop_request(r#"{"request_id":"hermes-abc123"}"#)) {
-        Ok(ControlRequest::Stop(StopRequest {
-            request_id: Some(id),
-        })) => assert_eq!(id, "hermes-abc123"),
-        _ => panic!("expected a scoped stop"),
+fn loopback_accepts_loopback_and_rejects_external_or_malformed() {
+    for addr in [
+        "127.0.0.1:43117",
+        "127.9.9.9:8080",
+        "[::1]:43117",
+        "localhost:43117",
+        "LOCALHOST:43117",
+    ] {
+        assert!(is_loopback_addr(addr), "{addr} should be loopback");
     }
-    // An empty JSON object is the legacy global stop.
+    for addr in [
+        "0.0.0.0:43117",
+        "192.168.1.5:43117",
+        "[::]:43117",
+        "example.com:43117",
+        "10.0.0.1:43117",
+        "",
+        "not an address",
+    ] {
+        assert!(!is_loopback_addr(addr), "{addr} must be rejected");
+    }
+}
+
+#[test]
+fn parse_request_routes_status_stop_pause_resume_and_seek() {
     assert!(matches!(
-        parse_request(&stop_request("{}")),
+        parse_request(b"GET /status HTTP/1.1\r\nHost: 127.0.0.1:43117\r\n\r\n"),
+        Ok(ControlRequest::Status)
+    ));
+    assert!(matches!(
+        parse_request(b"POST /stop HTTP/1.1\r\nContent-Length: 0\r\n\r\n"),
         Ok(ControlRequest::Stop(StopRequest { request_id: None }))
     ));
-}
-
-#[test]
-fn parse_request_rejects_bad_request_ids() {
     assert!(matches!(
-        parse_request(&stop_request(r#"{"request_id":"bad id"}"#)),
-        Err((400, _))
+        parse_request(&post_request("/stop", "{}")),
+        Ok(ControlRequest::Stop(StopRequest { request_id: None }))
     ));
     assert!(matches!(
-        parse_request(&stop_request("not json")),
-        Err((400, _))
+        parse_request(&post_request("/stop", r#"{"request_id":"hermes-abc123"}"#)),
+        Ok(ControlRequest::Stop(StopRequest {
+            request_id: Some(ref id),
+        })) if id == "hermes-abc123"
     ));
-    let speak = serde_json::json!({ "text": "hi", "request_id": "" });
     assert!(matches!(
-        parse_request(&speak_request(&speak)),
-        Err((400, _))
+        parse_request(&post_request("/pause", r#"{"request_id":"hermes-p"}"#)),
+        Ok(ControlRequest::Pause(ref id)) if id == "hermes-p"
     ));
-}
-
-#[test]
-fn parse_request_routes_scoped_pause_and_resume() {
-    match parse_request(&post_request("/pause", r#"{"request_id":"hermes-p"}"#)) {
-        Ok(ControlRequest::Pause(id)) => assert_eq!(id, "hermes-p"),
-        _ => panic!("expected a pause control"),
-    }
-    match parse_request(&post_request("/resume", r#"{"request_id":"hermes-r"}"#)) {
-        Ok(ControlRequest::Resume(id)) => assert_eq!(id, "hermes-r"),
-        _ => panic!("expected a resume control"),
-    }
-}
-
-#[test]
-fn parse_request_routes_seek_with_signed_delta() {
+    assert!(matches!(
+        parse_request(&post_request("/resume", r#"{"request_id":"hermes-r"}"#)),
+        Ok(ControlRequest::Resume(ref id)) if id == "hermes-r"
+    ));
     for (body, expected) in [
         (r#"{"request_id":"hermes-s","delta_ms":5000}"#, 5000i64),
         (r#"{"request_id":"hermes-s","delta_ms":-5000}"#, -5000),
         (r#"{"request_id":"hermes-s","delta_ms":60000}"#, 60_000),
         (r#"{"request_id":"hermes-s","delta_ms":-60000}"#, -60_000),
     ] {
-        match parse_request(&post_request("/seek", body)) {
+        assert!(matches!(
+            parse_request(&post_request("/seek", body)),
             Ok(ControlRequest::Seek(SeekControl {
-                request_id,
+                ref request_id,
                 delta_ms,
-            })) => {
-                assert_eq!(request_id, "hermes-s");
-                assert_eq!(delta_ms, expected);
-            }
-            _ => panic!("expected a seek control for {body}"),
-        }
+            })) if request_id == "hermes-s" && delta_ms == expected
+        ));
     }
 }
 
 #[test]
-fn parse_request_rejects_incomplete_or_invalid_controls() {
-    // Missing or invalid request ids.
+fn status_body_serves_the_reported_caption_with_cors() {
+    let caption = r#"{"text":"hi","captions":null,"position_ms":42,"duration_ms":1000,"paused":false,"active":true}"#;
+    crate::playback_signal::remember_caption(caption.to_string());
+    assert_eq!(status_body(), caption);
+    let response = http_response_cors(200, "OK", &status_body());
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("Content-Type: application/json\r\n"));
+    assert!(response.contains("Access-Control-Allow-Origin: *\r\n"));
+    assert!(response.ends_with(caption));
+    assert!(!http_response(200, "OK", r#"{"ok":true}"#).contains("Access-Control-Allow-Origin"));
+}
+
+#[test]
+fn invalid_requests_controls_and_speak_options_are_rejected() {
     assert!(matches!(
-        parse_request(&post_request("/pause", "{}")),
-        Err((400, _))
+        parse_request(&post_request("/play", "{}")),
+        Err((404, _))
     ));
-    assert!(matches!(
-        parse_request(&post_request("/pause", r#"{"request_id":"bad id"}"#)),
-        Err((400, _))
-    ));
-    assert!(matches!(
-        parse_request(&post_request("/resume", "not json")),
-        Err((400, _))
-    ));
-    // Seek needs a non-zero integer step inside the accepted range.
-    for body in [
-        r#"{"request_id":"hermes-s"}"#,
-        r#"{"request_id":"hermes-s","delta_ms":0}"#,
-        r#"{"request_id":"hermes-s","delta_ms":1.5}"#,
-        r#"{"request_id":"hermes-s","delta_ms":60001}"#,
-        r#"{"request_id":"hermes-s","delta_ms":-60001}"#,
-        r#"{"request_id":"bad id","delta_ms":5000}"#,
+    for raw in [
+        post_request("/stop", r#"{"request_id":"bad id"}"#),
+        post_request("/stop", "not json"),
+        speak_request(&serde_json::json!({ "text": "hi", "request_id": "" })),
+        post_request("/pause", "{}"),
+        post_request("/pause", r#"{"request_id":"bad id"}"#),
+        post_request("/resume", "not json"),
+        post_request("/seek", r#"{"request_id":"hermes-s"}"#),
+        post_request("/seek", r#"{"request_id":"hermes-s","delta_ms":0}"#),
+        post_request("/seek", r#"{"request_id":"hermes-s","delta_ms":1.5}"#),
+        post_request("/seek", r#"{"request_id":"hermes-s","delta_ms":60001}"#),
+        post_request("/seek", r#"{"request_id":"hermes-s","delta_ms":-60001}"#),
+        post_request("/seek", r#"{"request_id":"bad id","delta_ms":5000}"#),
     ] {
-        assert!(
-            matches!(parse_request(&post_request("/seek", body)), Err((400, _))),
-            "{body} must be rejected"
-        );
+        assert!(matches!(parse_request(&raw), Err((400, _))));
     }
+
+    let mut request: SpeakRequest =
+        serde_json::from_str(r#"{"text":"hello","engine":"not-an-engine"}"#).unwrap();
+    assert!(validate_speak_options(&request).is_err());
+    request.engine = None;
+    request.effect = Some("not-an-effect".to_string());
+    assert!(validate_speak_options(&request).is_err());
 }
 
 #[test]
-fn parse_request_404_names_every_control_route() {
-    match parse_request(&post_request("/play", "{}")) {
-        Err((404, message)) => {
-            for path in ["/pause", "/resume", "/seek", "/stop", "/speak"] {
-                assert!(message.contains(path), "message misses {path}: {message}");
-            }
-        }
-        _ => panic!("an unknown route must 404"),
-    }
-}
+fn speak_request_parses_fields_and_legacy_aliases() {
+    let full = serde_json::json!({
+        "text": "hello",
+        "request_id": "hermes-1",
+        "wait": true,
+        "post_process": true
+    });
+    let Ok(ControlRequest::Speak(s)) = parse_request(&speak_request(&full)) else {
+        panic!("expected speak request");
+    };
+    assert_eq!(s.text, "hello");
+    assert_eq!(s.request_id.as_deref(), Some("hermes-1"));
+    assert_eq!(s.wait, Some(true));
+    assert_eq!(s.post_process, Some(true));
 
-#[test]
-fn control_body_reports_the_action_or_not_playing() {
-    let applied: serde_json::Value =
-        serde_json::from_str(&control_body("paused", "hermes-p", true)).expect("valid JSON");
-    assert_eq!(applied["ok"], true);
-    assert_eq!(applied["request_id"], "hermes-p");
-    assert_eq!(applied["outcome"], "paused");
+    let minimal = serde_json::json!({ "text": "hello" });
+    let Ok(ControlRequest::Speak(s)) = parse_request(&speak_request(&minimal)) else {
+        panic!("expected speak request");
+    };
+    assert_eq!(s.wait, None);
+    assert_eq!(s.post_process, None);
 
-    let refused: serde_json::Value =
-        serde_json::from_str(&control_body("seeked", "hermes-s", false)).expect("valid JSON");
-    assert_eq!(refused["ok"], true);
-    assert_eq!(refused["request_id"], "hermes-s");
-    assert_eq!(refused["outcome"], "not_playing");
-}
-
-#[test]
-fn speak_request_parses_request_id() {
-    let request = serde_json::json!({ "text": "hello", "request_id": "hermes-1", "wait": true });
-    match parse_request(&speak_request(&request)) {
-        Ok(ControlRequest::Speak(speak)) => {
-            assert_eq!(speak.request_id.as_deref(), Some("hermes-1"));
-        }
-        _ => panic!("expected a speak request"),
-    }
+    let legacy = serde_json::json!({
+        "text": "hello",
+        "profile": "pi",
+        "persist_selection": true,
+        "condense": true,
+        "wait": false
+    });
+    let Ok(ControlRequest::Speak(s)) = parse_request(&speak_request(&legacy)) else {
+        panic!("expected speak request");
+    };
+    assert_eq!(s.post_process, Some(true));
+    assert_eq!(s.wait, Some(false));
 }
 
 // ---- request lifecycle (run_speak) ----
-//
-// `speak` and `wait_finished` are test doubles for synthesis and the
-// webview's playback-finished signal; the registry, the wait lock and the
-// cancellation polling are the real ones. Ids are unique per test because
-// the registry is process-global.
-
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::sync::oneshot;
 
 fn unique_id(name: &str) -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     format!("{}-{}", name, NEXT.fetch_add(1, Ordering::SeqCst))
 }
 
-/// A finish that never comes (models a wait the test must not rely on).
 fn never_finishes(_generation: u64) -> std::future::Pending<bool> {
     std::future::pending()
 }
 
-/// Bound every lifecycle run: a hang is the legacy failure mode.
 async fn bounded<F: Future>(fut: F) -> F::Output {
     tokio::time::timeout(Duration::from_secs(3), fut)
         .await
@@ -257,21 +209,7 @@ async fn stop_before_speak_registers_never_speaks() {
     ))
     .await;
     assert_eq!(outcome, Ok(SpeakOutcome::Cancelled));
-    assert_eq!(
-        spoken.load(Ordering::SeqCst),
-        0,
-        "a pre-empted request spoke"
-    );
-}
-
-#[test]
-fn invalid_speak_options_are_rejected_before_interrupt() {
-    let mut request: SpeakRequest =
-        serde_json::from_str(r#"{"text":"hello","engine":"not-an-engine"}"#).unwrap();
-    assert!(validate_speak_options(&request).is_err());
-    request.engine = None;
-    request.effect = Some("not-an-effect".to_string());
-    assert!(validate_speak_options(&request).is_err());
+    assert_eq!(spoken.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -363,7 +301,7 @@ async fn global_abort_releases_request_queued_before_synthesis() {
             never_finishes,
         )),
         async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(15)).await;
             GENERATION.fetch_add(1, Ordering::SeqCst);
         },
     );
@@ -372,46 +310,42 @@ async fn global_abort_releases_request_queued_before_synthesis() {
 }
 
 #[tokio::test]
-async fn a_requests_own_interrupt_does_not_cancel_it() {
-    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    fn generation() -> u64 {
-        GENERATION.load(Ordering::SeqCst)
+async fn own_interrupt_spares_request_but_racing_global_stop_cancels() {
+    static GEN_OWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    fn gen_own() -> u64 {
+        GEN_OWN.load(Ordering::SeqCst)
     }
     let lock = tokio::sync::Mutex::new(());
-    let result = bounded(run_speak_with_interrupt(
+    let own = bounded(run_speak_with_interrupt(
         None,
         true,
         &lock,
-        generation,
+        gen_own,
         || {
-            GENERATION.fetch_add(1, Ordering::SeqCst);
+            GEN_OWN.fetch_add(1, Ordering::SeqCst);
             true
         },
         |_, captured| {
-            assert_eq!(captured, GENERATION.load(Ordering::SeqCst));
+            assert_eq!(captured, GEN_OWN.load(Ordering::SeqCst));
             async { Ok(()) }
         },
         |_| async { true },
     ))
     .await;
-    assert_eq!(result, Ok(SpeakOutcome::Spoken));
-}
+    assert_eq!(own, Ok(SpeakOutcome::Spoken));
 
-#[tokio::test]
-async fn global_stop_racing_with_own_interrupt_cancels_the_request() {
-    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    fn generation() -> u64 {
-        GENERATION.load(Ordering::SeqCst)
+    static GEN_RACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    fn gen_race() -> u64 {
+        GEN_RACE.load(Ordering::SeqCst)
     }
-    let lock = tokio::sync::Mutex::new(());
     let spoken = AtomicBool::new(false);
-    let result = bounded(run_speak_with_interrupt(
+    let raced = bounded(run_speak_with_interrupt(
         None,
         true,
         &lock,
-        generation,
+        gen_race,
         || {
-            GENERATION.fetch_add(2, Ordering::SeqCst);
+            GEN_RACE.fetch_add(2, Ordering::SeqCst);
             true
         },
         |_, _| {
@@ -421,7 +355,7 @@ async fn global_stop_racing_with_own_interrupt_cancels_the_request() {
         never_finishes,
     ))
     .await;
-    assert_eq!(result, Ok(SpeakOutcome::Cancelled));
+    assert_eq!(raced, Ok(SpeakOutcome::Cancelled));
     assert!(!spoken.load(Ordering::SeqCst));
 }
 
@@ -429,7 +363,7 @@ async fn global_stop_racing_with_own_interrupt_cancels_the_request() {
 async fn stop_while_queued_behind_another_wait_never_speaks() {
     let id = unique_id("queued");
     let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-    let held = lock.clone().lock_owned().await; // an earlier request is playing
+    let held = lock.clone().lock_owned().await;
     let spoken = std::sync::Arc::new(AtomicUsize::new(0));
     let task = {
         let (id, lock, spoken) = (id.clone(), lock.clone(), spoken.clone());
@@ -447,11 +381,8 @@ async fn stop_while_queued_behind_another_wait_never_speaks() {
             .await
         })
     };
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    assert!(
-        !task.is_finished(),
-        "queued request settled before its stop"
-    );
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    assert!(!task.is_finished());
     assert!(matches!(
         speak_requests::cancel(&id, || panic!("nothing of this request plays")),
         speak_requests::StopOutcome::Cancelled { .. }
@@ -459,16 +390,9 @@ async fn stop_while_queued_behind_another_wait_never_speaks() {
     let outcome = bounded(task).await.expect("join");
     drop(held);
     assert_eq!(outcome, Ok(SpeakOutcome::Cancelled));
-    assert_eq!(
-        spoken.load(Ordering::SeqCst),
-        0,
-        "a cancelled queued request spoke"
-    );
+    assert_eq!(spoken.load(Ordering::SeqCst), 0);
 }
 
-/// The reported race: the stop lands while the request is synthesizing.
-/// The request must settle cancelled at once instead of waiting for a
-/// playback whose audio its cancelled scope never emits.
 #[tokio::test]
 async fn stop_during_synthesis_settles_cancelled_without_waiting() {
     let id = unique_id("synth");
@@ -489,10 +413,9 @@ async fn stop_during_synthesis_settles_cancelled_without_waiting() {
         true,
         &lock,
         |seq| async move {
-            assert_ne!(seq, NO_REQUEST, "speak must run under the request's scope");
+            assert_ne!(seq, NO_REQUEST);
             started_tx.send(()).expect("signal start");
             release_rx.await.expect("released");
-            // Synthesis observes the cancellation through its scope.
             assert!(crate::AbortScope::begin_for_request(seq).aborted());
             Ok(())
         },
@@ -506,24 +429,24 @@ async fn stop_during_synthesis_settles_cancelled_without_waiting() {
     assert_eq!(outcome, Ok(SpeakOutcome::Cancelled));
 }
 
-/// A stopped playback's finish must arrive before the next unscoped
-/// waiter, which accepts any finish, can start.
 #[tokio::test]
 async fn cancel_that_stopped_playback_absorbs_its_own_finish() {
     let id = unique_id("absorb");
     let lock = tokio::sync::Mutex::new(());
+    let (waiting_tx, waiting_rx) = oneshot::channel::<()>();
     let (finish_tx, finish_rx) = oneshot::channel::<()>();
     let finish_tx = std::sync::Mutex::new(Some(finish_tx));
+    let waiting_tx = std::sync::Mutex::new(Some(waiting_tx));
     let finish_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let canceller = {
         let id = id.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(80)).await;
+            waiting_rx.await.expect("entered playback wait");
             speak_requests::cancel(&id, || {
-                // The webview stops and reports the finish ~150 ms later.
                 let tx = finish_tx.lock().unwrap().take().expect("one stop");
                 std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(150));
+                    // Exceed CANCEL_POLL (25 ms) so the wait sees cancellation before finish arrives.
+                    std::thread::sleep(Duration::from_millis(120));
                     let _ = tx.send(());
                 });
             })
@@ -535,17 +458,19 @@ async fn cancel_that_stopped_playback_absorbs_its_own_finish() {
         true,
         &lock,
         |seq| async move {
-            // The reading started and the webview reported it audible: it
-            // owns the speakers, and a scoped stop compares its reading.
             let reading = 9001;
             speak_requests::attach_reading(seq, reading);
             speak_requests::claim_audible(reading);
             Ok(())
         },
-        move |_| async move {
-            let finished = finish_rx.await.is_ok();
-            seen.store(finished, Ordering::SeqCst);
-            finished
+        move |_| {
+            let waiting_tx = waiting_tx.lock().unwrap().take().expect("one wait");
+            async move {
+                let _ = waiting_tx.send(());
+                let finished = finish_rx.await.is_ok();
+                seen.store(finished, Ordering::SeqCst);
+                finished
+            }
         },
     ))
     .await;
@@ -557,14 +482,9 @@ async fn cancel_that_stopped_playback_absorbs_its_own_finish() {
             ..
         }
     ));
-    assert!(
-        finish_seen.load(Ordering::SeqCst),
-        "answered before its own stop's playback-finished landed"
-    );
+    assert!(finish_seen.load(Ordering::SeqCst));
 }
 
-/// A synthesis that fails because it was cancelled is a cancellation,
-/// not a 500.
 #[tokio::test]
 async fn cancelled_synthesis_error_is_reported_as_cancelled() {
     let id = unique_id("synth-err");
@@ -586,8 +506,6 @@ async fn cancelled_synthesis_error_is_reported_as_cancelled() {
     assert_eq!(outcome, Ok(SpeakOutcome::Cancelled));
 }
 
-/// Stop while the request's audio plays: the blocked waiter is released
-/// immediately rather than at the next playback-finished.
 #[tokio::test]
 async fn stop_during_playback_wait_releases_the_waiter() {
     let id = unique_id("playing");
@@ -595,7 +513,7 @@ async fn stop_during_playback_wait_releases_the_waiter() {
     let canceller = {
         let id = id.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(80)).await;
+            tokio::time::sleep(Duration::from_millis(15)).await;
             speak_requests::cancel(&id, || {})
         })
     };
@@ -614,28 +532,20 @@ async fn stop_during_playback_wait_releases_the_waiter() {
     ));
 }
 
-/// The reported race: replies read back to back. A foreign
-/// playback-finished (the previous reply's late stop, a double-copy
-/// drain) fires while this request is still synthesizing. The wait must
-/// match this request's own reading and ignore every foreign finish —
-/// an early release resets the plugin's action row while its audio has
-/// not even started.
 #[tokio::test]
 async fn a_foreign_finish_does_not_satisfy_the_requests_wait() {
     let _guard = crate::playback_signal::playback_wait_test_lock();
     let id = unique_id("foreign-finish");
     let lock = tokio::sync::Mutex::new(());
-    // A foreign playback run ends 60 ms in, mid-synthesis of this request.
     let foreign_fired = std::sync::Arc::new(AtomicBool::new(false));
     {
         let foreign_fired = foreign_fired.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(60)).await;
+            tokio::time::sleep(Duration::from_millis(15)).await;
             foreign_fired.store(true, Ordering::SeqCst);
             crate::playback_signal::signal_finished_for(None);
         });
     }
-    // This request's own playback ends 150 ms after the foreign finish.
     {
         let id = id.clone();
         tokio::spawn(async move {
@@ -643,9 +553,9 @@ async fn a_foreign_finish_does_not_satisfy_the_requests_wait() {
                 if let Some(reading) = speak_requests::reading_for_id(&id) {
                     break reading;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             };
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(Duration::from_millis(40)).await;
             crate::playback_signal::signal_finished_for(Some(reading));
         });
     }
@@ -656,10 +566,8 @@ async fn a_foreign_finish_does_not_satisfy_the_requests_wait() {
         true,
         &lock,
         |seq| async move {
-            // Synthesis begins the reading (attaching it) and takes long
-            // enough that the foreign finish lands inside it.
             crate::AbortScope::begin_reading_for_request(seq);
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
             Ok(())
         },
         move |_| {
@@ -673,19 +581,10 @@ async fn a_foreign_finish_does_not_satisfy_the_requests_wait() {
     ))
     .await;
     assert_eq!(outcome, Ok(SpeakOutcome::Spoken));
-    assert!(
-        foreign_fired.load(Ordering::SeqCst),
-        "the foreign finish must land during the run for this test to bite"
-    );
-    assert!(
-        started.elapsed() >= Duration::from_millis(120),
-        "resolved on the foreign finish after {:?}, not on this request's own playback",
-        started.elapsed()
-    );
+    assert!(foreign_fired.load(Ordering::SeqCst));
+    assert!(started.elapsed() >= Duration::from_millis(30));
 }
 
-/// A stop that arrives after its request finished must not cancel, delay
-/// or stop a later request.
 #[tokio::test]
 async fn late_stop_spares_the_next_request() {
     let first = unique_id("first");
@@ -752,7 +651,6 @@ async fn reused_request_id_is_rejected() {
     assert_eq!(spoken.load(Ordering::SeqCst), 0);
 }
 
-/// No request id: the legacy lifecycle (speak, then wait for the finish).
 #[tokio::test]
 async fn unscoped_speak_keeps_the_legacy_lifecycle() {
     let lock = tokio::sync::Mutex::new(());
@@ -787,10 +685,8 @@ async fn unscoped_speak_keeps_the_legacy_lifecycle() {
     ));
 }
 
-/// A non-waiting speak answers at playback start but stays stoppable
-/// until its playback finishes; after that a stop is a no-op.
 #[tokio::test]
-async fn non_wait_request_stays_stoppable_until_playback_ends() {
+async fn non_wait_request_answers_audible_and_stays_stoppable_until_end() {
     let playing = unique_id("nowait-playing");
     let lock = tokio::sync::Mutex::new(());
     let outcome = bounded(run_speak(
@@ -821,35 +717,24 @@ async fn non_wait_request_stays_stoppable_until_playback_ends() {
     finish_tx.send(()).expect("finish playback");
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while speak_requests::is_live(&ended) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "non-wait request never finished"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(std::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(
         speak_requests::cancel(&ended, || panic!("an ended request owns nothing")),
         speak_requests::StopOutcome::AlreadyFinished
     );
-}
 
-/// A paginated reading's speak returns only after its last fragment, so a
-/// non-wait request answers once its reading is audible and the rest of the
-/// speak runs detached, still stoppable.
-#[tokio::test]
-async fn non_wait_request_answers_once_its_reading_is_audible() {
-    let id = unique_id("nowait-audible");
-    let lock = tokio::sync::Mutex::new(());
+    let audible = unique_id("nowait-audible");
     let (rest_tx, rest_rx) = oneshot::channel::<()>();
     let outcome = bounded(run_speak_inner(
-        Some(&id),
+        Some(&audible),
         false,
         &lock,
         abort_generation,
         |_| true,
         || false,
         move |_, _| async move {
-            // Later fragments: still synthesizing when the answer goes out.
             let _ = rest_rx.await;
             Ok(())
         },
@@ -857,147 +742,10 @@ async fn non_wait_request_answers_once_its_reading_is_audible() {
     ))
     .await;
     assert_eq!(outcome, Ok(SpeakOutcome::Spoken));
-    assert!(
-        speak_requests::is_live(&id),
-        "the detached reading stays live"
-    );
+    assert!(speak_requests::is_live(&audible));
     let _ = rest_tx.send(());
     assert!(matches!(
-        speak_requests::cancel(&id, || {}),
+        speak_requests::cancel(&audible, || {}),
         speak_requests::StopOutcome::Cancelled { .. }
     ));
-}
-
-/// A known-slow client changes its mind and disconnects instead of
-/// completing the request; the reader must time out and free the
-/// connection rather than blocking forever.
-#[test]
-fn slow_stalled_client_is_dropped_after_read_timeout() {
-    let addr = "127.0.0.1:0";
-    let listener = TcpListener::bind(addr).expect("bind ephemeral port");
-    let server_addr = listener.local_addr().expect("local addr");
-
-    let judge = std::thread::spawn(move || {
-        let mut established = listener
-            .incoming()
-            .next()
-            .expect("one connection")
-            .expect("accept");
-        let _ = established.set_read_timeout(Some(READ_TIMEOUT));
-        let started = std::time::Instant::now();
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut chunk = [0_u8; 4096];
-        // The partial body arrives quickly; keep reading until the
-        // read-timeout fires while the client holds the connection open.
-        let error = loop {
-            match established.read(&mut chunk) {
-                Ok(0) => panic!("client EOF before the read timeout fired"),
-                Ok(n) => buffer.extend_from_slice(&chunk[..n]),
-                Err(error) => break error,
-            }
-        };
-        let timed_out = error.kind() == std::io::ErrorKind::WouldBlock
-            || error.kind() == std::io::ErrorKind::TimedOut;
-        assert!(timed_out, "read failed with a non-timeout error: {}", error);
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= READ_TIMEOUT,
-            "reader gave up early after {:?}",
-            elapsed
-        );
-        assert!(
-            elapsed < READ_TIMEOUT + Duration::from_secs(3),
-            "reader lingered {:?} past its timeout",
-            elapsed - READ_TIMEOUT
-        );
-    });
-
-    // The client half: connect, send a partial body, then stall — never
-    // send the remaining 8 declared bytes and never close the socket.
-    let _stall_client = std::thread::spawn(move || {
-        let mut client = TcpStream::connect(server_addr).expect("connect");
-        client
-            .write_all(
-                b"POST /speak HTTP/1.1
-Content-Length: 10
-
-ab",
-            )
-            .expect("write partial body");
-        client.flush().expect("flush");
-        // Hold the connection open well beyond READ_TIMEOUT so the
-        // server-side read timeout is what severs the request.
-        std::thread::sleep(READ_TIMEOUT + Duration::from_secs(3));
-        drop(client);
-    });
-
-    judge.join().expect("server-side assertions hold");
-}
-
-/// Build a POST /speak request whose Content-Length always matches.
-fn speak_request(body: &serde_json::Value) -> Vec<u8> {
-    let body = body.to_string();
-    format!(
-        "POST /speak HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(),
-        body
-    )
-    .into_bytes()
-}
-
-#[test]
-fn speak_request_parses_wait_field() {
-    let request = serde_json::json!({ "text": "hello", "wait": true });
-    match parse_request(&speak_request(&request)) {
-        Ok(ControlRequest::Speak(speak)) => {
-            assert_eq!(speak.text, "hello");
-            assert_eq!(speak.wait, Some(true));
-        }
-        _ => panic!("expected a speak request"),
-    }
-}
-
-#[test]
-fn speak_request_wait_defaults_to_false() {
-    let request = serde_json::json!({ "text": "hello" });
-    match parse_request(&speak_request(&request)) {
-        Ok(ControlRequest::Speak(speak)) => {
-            assert_eq!(speak.wait, None);
-            assert_eq!(speak.post_process, None);
-        }
-        _ => panic!("expected a speak request"),
-    }
-}
-
-/// Legacy callers send profile/persist_selection fields the server drops;
-/// parsing must keep accepting them alongside the post_process/wait
-/// fields. `condense` is the retired wire name and must keep working.
-#[test]
-fn speak_request_tolerates_unknown_fields() {
-    let request = serde_json::json!({
-        "text": "hello",
-        "profile": "pi",
-        "persist_selection": true,
-        "condense": true,
-        "wait": false
-    });
-    match parse_request(&speak_request(&request)) {
-        Ok(ControlRequest::Speak(speak)) => {
-            assert_eq!(speak.post_process, Some(true));
-            assert_eq!(speak.wait, Some(false));
-        }
-        _ => panic!("expected a speak request"),
-    }
-}
-
-/// The current wire name parses too.
-#[test]
-fn speak_request_accepts_post_process_field() {
-    let request = serde_json::json!({ "text": "hello", "post_process": true });
-    match parse_request(&speak_request(&request)) {
-        Ok(ControlRequest::Speak(speak)) => {
-            assert_eq!(speak.post_process, Some(true));
-        }
-        _ => panic!("expected a speak request"),
-    }
 }

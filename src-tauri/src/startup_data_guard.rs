@@ -152,37 +152,26 @@ mod tests {
     }
 
     #[test]
-    fn missing_files_pass() {
-        let s = Scratch::new("missing");
-        let result = check_startup_data_at(&s.path("config.json"), &s.path("history.json"));
-        assert!(result.is_ok(), "missing files must pass: {result:?}");
+    fn missing_and_valid_files_pass() {
+        let s1 = Scratch::new("missing");
+        assert!(check_startup_data_at(&s1.path("config.json"), &s1.path("history.json")).is_ok());
+
+        let s2 = Scratch::new("valid");
+        std::fs::write(s2.path("config.json"), valid_config_json()).unwrap();
+        std::fs::write(s2.path("history.json"), valid_history_json()).unwrap();
+        assert!(check_startup_data_at(&s2.path("config.json"), &s2.path("history.json")).is_ok());
+
+        let s3 = Scratch::new("missing-config");
+        std::fs::write(s3.path("history.json"), valid_history_json()).unwrap();
+        assert!(check_startup_data_at(&s3.path("config.json"), &s3.path("history.json")).is_ok());
     }
 
     #[test]
-    fn valid_generated_files_pass() {
-        let s = Scratch::new("valid");
-        let cfg = s.path("config.json");
-        let hist = s.path("history.json");
-        std::fs::write(&cfg, valid_config_json()).unwrap();
-        std::fs::write(&hist, valid_history_json()).unwrap();
-        assert!(check_startup_data_at(&cfg, &hist).is_ok());
-    }
-
-    #[test]
-    fn missing_config_with_valid_history_passes() {
-        let s = Scratch::new("missing-config");
-        let hist = s.path("history.json");
-        std::fs::write(&hist, valid_history_json()).unwrap();
-        assert!(check_startup_data_at(&s.path("config.json"), &hist).is_ok());
-    }
-
-    #[test]
-    fn malformed_config_json_blocks_with_path_and_position() {
-        let s = Scratch::new("malformed-config");
-        let cfg = s.path("config.json");
+    fn invalid_json_eof_and_non_utf8_block_with_path() {
+        let s1 = Scratch::new("malformed-config");
+        let cfg = s1.path("config.json");
         std::fs::write(&cfg, "{\n  \"general\": ,\n}").unwrap();
-        let err = check_startup_data_at(&cfg, &s.path("history.json"))
-            .expect_err("malformed config must block");
+        let err = check_startup_data_at(&cfg, &s1.path("history.json")).unwrap_err();
         match &err {
             StartupDataError::Invalid {
                 path, reason, line, ..
@@ -194,28 +183,17 @@ mod tests {
             other => panic!("expected Invalid, got {other:?}"),
         }
         assert!(err.to_string().contains(&cfg.display().to_string()));
-    }
 
-    #[test]
-    fn malformed_history_json_blocks() {
-        let s = Scratch::new("malformed-history");
-        let hist = s.path("history.json");
+        let s2 = Scratch::new("malformed-history");
+        let hist = s2.path("history.json");
         std::fs::write(&hist, "{ \"entries\": [").unwrap();
-        let err = check_startup_data_at(&s.path("config.json"), &hist)
-            .expect_err("malformed history must block");
-        assert!(matches!(
-            err,
-            StartupDataError::Invalid { ref path, .. } if path == &hist
-        ));
-    }
+        let err = check_startup_data_at(&s2.path("config.json"), &hist).unwrap_err();
+        assert!(matches!(err, StartupDataError::Invalid { ref path, .. } if path == &hist));
 
-    #[test]
-    fn empty_file_blocks_as_unexpected_eof() {
-        let s = Scratch::new("empty");
-        let cfg = s.path("config.json");
-        std::fs::write(&cfg, "").unwrap();
-        let err = check_startup_data_at(&cfg, &s.path("history.json"))
-            .expect_err("empty file must block");
+        let s3 = Scratch::new("empty");
+        let empty_cfg = s3.path("config.json");
+        std::fs::write(&empty_cfg, "").unwrap();
+        let err = check_startup_data_at(&empty_cfg, &s3.path("history.json")).unwrap_err();
         assert!(matches!(
             err,
             StartupDataError::Invalid {
@@ -223,15 +201,11 @@ mod tests {
                 ..
             }
         ));
-    }
 
-    #[test]
-    fn non_utf8_bytes_block_as_invalid() {
-        let s = Scratch::new("non-utf8");
-        let hist = s.path("history.json");
-        std::fs::write(&hist, [0xff_u8, 0xfe, 0x00, 0x7b]).unwrap();
-        let err =
-            check_startup_data_at(&s.path("config.json"), &hist).expect_err("non-UTF-8 must block");
+        let s4 = Scratch::new("non-utf8");
+        let raw_hist = s4.path("history.json");
+        std::fs::write(&raw_hist, [0xff_u8, 0xfe, 0x00, 0x7b]).unwrap();
+        let err = check_startup_data_at(&s4.path("config.json"), &raw_hist).unwrap_err();
         assert!(matches!(err, StartupDataError::Invalid { .. }));
     }
 
@@ -261,22 +235,17 @@ mod tests {
     }
 
     #[test]
-    fn directory_at_config_path_blocks_as_unreadable() {
-        let s = Scratch::new("dir-config");
-        let cfg = s.path("config.json");
+    fn directories_at_data_paths_block_as_unreadable() {
+        let s1 = Scratch::new("dir-config");
+        let cfg = s1.path("config.json");
         std::fs::create_dir_all(&cfg).unwrap();
-        let err = check_startup_data_at(&cfg, &s.path("history.json"))
-            .expect_err("directory at config path must block");
+        let err = check_startup_data_at(&cfg, &s1.path("history.json")).unwrap_err();
         assert!(matches!(err, StartupDataError::Unreadable { ref path, .. } if path == &cfg));
-    }
 
-    #[test]
-    fn directory_at_history_path_blocks_as_unreadable() {
-        let s = Scratch::new("dir-history");
-        let hist = s.path("history.json");
+        let s2 = Scratch::new("dir-history");
+        let hist = s2.path("history.json");
         std::fs::create_dir_all(&hist).unwrap();
-        let err = check_startup_data_at(&s.path("config.json"), &hist)
-            .expect_err("directory at history path must block");
+        let err = check_startup_data_at(&s2.path("config.json"), &hist).unwrap_err();
         assert!(matches!(err, StartupDataError::Unreadable { ref path, .. } if path == &hist));
     }
 

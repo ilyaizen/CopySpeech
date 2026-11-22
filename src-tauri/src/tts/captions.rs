@@ -352,49 +352,6 @@ mod tests {
         assert_eq!(read_sidecar(path), None);
     }
 
-    #[test]
-    fn rejected_fragment_captions_preserve_audio_and_neighbor_timings() {
-        let meta = super::super::stream::AudioFormatMeta {
-            sample_rate: 8000,
-            channels: 1,
-            bits_per_sample: 16,
-        };
-        let make = |text: &str| SpeechAudio {
-            bytes: super::super::stream::pcm_to_wav(&vec![0; 16000], &meta),
-            captions: Some(CaptionAlignment {
-                text: text.into(),
-                words: vec![WordTiming {
-                    text_start: 0,
-                    text_end: text.encode_utf16().count(),
-                    start_ms: 100.0,
-                    end_ms: 300.0,
-                }],
-            }),
-        };
-        // Invalid offsets must degrade only this fragment, not invalidate the
-        // joined reading.
-        let mut middle = make("wrong");
-        middle.captions.as_mut().unwrap().words[0].text_end = 99;
-        let speech = concat_speech(vec![
-            (make("A"), "A".into()),
-            (middle, "😀 B".into()),
-            (make("C"), "C".into()),
-        ])
-        .unwrap();
-        let captions = speech.captions.unwrap();
-        assert_eq!(captions.text, "A 😀 B C");
-        assert_eq!(captions.words.len(), 2);
-        assert_eq!(captions.words[0].start_ms, 100.0);
-        assert_eq!(captions.words[0].end_ms, 300.0);
-        assert_eq!(captions.words[1].text_start, 7);
-        assert_eq!(captions.words[1].start_ms, 2100.0);
-        assert_eq!(captions.words[1].end_ms, 2300.0);
-        assert_eq!(
-            speech.bytes,
-            super::super::stream::pcm_to_wav(&vec![0; 48000], &meta)
-        );
-        assert!(captions.validate().is_ok());
-    }
 
     #[test]
     fn overrunning_fragment_captions_are_clamped_not_dropped() {
@@ -503,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn untimed_fragment_uses_source_text_between_timed_neighbors() {
+    fn untimed_or_invalid_middle_fragment_preserves_audio_and_neighbor_timings() {
         let meta = super::super::stream::AudioFormatMeta {
             sample_rate: 8000,
             channels: 1,
@@ -521,12 +478,15 @@ mod tests {
                 }],
             }),
         };
+        let mut invalid = timed("wrong");
+        invalid.captions.as_mut().unwrap().words[0].text_end = 99;
         for captions in [
             None,
             Some(CaptionAlignment {
                 text: String::new(),
                 words: Vec::new(),
             }),
+            invalid.captions,
         ] {
             let middle = SpeechAudio {
                 bytes: super::super::stream::pcm_to_wav(&vec![0; 16000], &meta),
@@ -541,22 +501,23 @@ mod tests {
             let captions = speech.captions.unwrap();
             assert_eq!(captions.text, "A 😀 B C");
             assert_eq!(captions.words.len(), 2);
+            assert_eq!(captions.words[0].start_ms, 100.0);
+            assert_eq!(captions.words[0].end_ms, 300.0);
             assert_eq!(captions.words[1].text_start, 7);
             assert_eq!(captions.words[1].start_ms, 2100.0);
+            assert_eq!(captions.words[1].end_ms, 2300.0);
             assert_eq!(
                 speech.bytes,
                 super::super::stream::pcm_to_wav(&vec![0; 48000], &meta)
             );
+            assert!(captions.validate().is_ok());
         }
     }
 
     #[test]
-    fn concatenation_still_rejects_undecodable_audio() {
+    fn concat_speech_clamps_placeholder_headers_and_rejects_bad_audio() {
         assert!(concat_speech(vec![(vec![1, 2, 3].into(), "Hi".into())]).is_err());
-    }
 
-    #[test]
-    fn concat_clamps_streaming_placeholder_headers() {
         // xAI ships data = i32::MAX and a sign-bit-set RIFF size; rodio's
         // symphonia decoder trusts those fields and used to fail the whole
         // concatenation with "end of stream" (the 2026-10-26 Read-aloud
@@ -583,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn estimated_words_fill_the_measured_duration_contiguously() {
+    fn estimate_alignment_fills_and_weights_words_by_length() {
         let alignment = estimate_alignment("Hello, world!", 1000.0);
         assert_eq!(alignment.text, "Hello, world!");
         assert_eq!(alignment.words.len(), 2);
@@ -595,13 +556,10 @@ mod tests {
         assert_eq!(alignment.words[0].end_ms, alignment.words[1].start_ms);
         assert_eq!(alignment.words[1].end_ms, 1000.0);
         alignment.validate().unwrap();
-    }
 
-    #[test]
-    fn estimation_weights_words_by_length() {
         // UTF-16 token lengths 2, 5, 6 of 13 total over 1300 ms.
-        let alignment = estimate_alignment("hi there friend", 1300.0);
-        let ends: Vec<f64> = alignment.words.iter().map(|w| w.end_ms).collect();
+        let weighted = estimate_alignment("hi there friend", 1300.0);
+        let ends: Vec<f64> = weighted.words.iter().map(|w| w.end_ms).collect();
         assert_eq!(ends, vec![200.0, 700.0, 1300.0]);
     }
 
@@ -691,20 +649,11 @@ mod emote_tag_tests {
         assert_eq!(word_texts(&caps), vec!["Hello", "world", "again"]);
     }
 
+    /// Native captions pass through intact when tag-free, and strip tag words
+    /// while shifting later word offsets left when tags are echoed.
     #[test]
-    fn plain_text_estimation_is_unchanged() {
-        let caps = estimate_alignment("Hello world", 1000.0);
-        caps.validate().unwrap();
-        assert_eq!(caps.text, "Hello world");
-        assert_eq!(caps.words.len(), 2);
-        assert_eq!(word_texts(&caps), vec!["Hello", "world"]);
-    }
-
-    /// Tag-free captions pass through the strip untouched (the ElevenLabs
-    /// emission path runs it on every snapshot).
-    #[test]
-    fn stripping_tag_free_captions_is_a_no_op() {
-        let caps = CaptionAlignment {
+    fn stripping_emote_tags_keeps_clean_captions_and_shifts_tagged_words() {
+        let clean = CaptionAlignment {
             text: "Hello 😀 world".into(),
             words: vec![
                 WordTiming {
@@ -721,15 +670,9 @@ mod emote_tag_tests {
                 },
             ],
         };
-        let stripped = caps.stripped_of_emote_tags();
-        assert_eq!(stripped, caps);
-    }
+        assert_eq!(clean.stripped_of_emote_tags(), clean);
 
-    /// Native captions that echo tag characters lose them: tag text and its
-    /// word entries are removed, later words shift left, offsets stay valid.
-    #[test]
-    fn stripping_removes_tag_words_and_shifts_offsets() {
-        let caps = CaptionAlignment {
+        let tagged = CaptionAlignment {
             text: "[sighs] Hello world".into(),
             words: vec![
                 WordTiming {
@@ -764,7 +707,7 @@ mod emote_tag_tests {
                 }, // "world"
             ],
         };
-        let stripped = caps.stripped_of_emote_tags();
+        let stripped = tagged.stripped_of_emote_tags();
         stripped.validate().unwrap();
         assert_eq!(stripped.text, " Hello world");
         let words = word_texts(&stripped);

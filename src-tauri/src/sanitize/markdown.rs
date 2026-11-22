@@ -112,44 +112,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_strip_headers() {
+    fn unit_strippers_clean_markdown_elements() {
         assert_eq!(strip_headers("# Header"), "Header.");
-        assert_eq!(strip_headers("## Header"), "Header.");
         assert_eq!(strip_headers("### Header"), "Header.");
         assert_eq!(strip_headers("Normal text"), "Normal text");
-        // Should not double-up existing sentence-ending punctuation
         assert_eq!(strip_headers("# Already done!"), "Already done!");
         assert_eq!(strip_headers("# Section:"), "Section:");
         assert_eq!(strip_headers("# Question?"), "Question?");
-    }
 
-    #[test]
-    fn test_strip_code_blocks() {
         assert_eq!(strip_code_blocks("Text\n```code```\nMore"), "Text\n\nMore");
         assert_eq!(strip_code_blocks("```print()```"), "");
-    }
-
-    #[test]
-    fn test_strip_inline_code() {
         assert_eq!(strip_inline_code("Use `sudo` command"), "Use  command");
         assert_eq!(strip_inline_code("No code here"), "No code here");
-    }
-
-    #[test]
-    fn test_strip_links() {
-        assert_eq!(
-            strip_links("Visit [Google](https://google.com)"),
-            "Visit Google"
-        );
-        assert_eq!(strip_links("[Link](url)"), "Link");
-    }
-
-    #[test]
-    fn test_strip_bold_italic() {
-        assert_eq!(strip_bold_italic("**bold**"), "bold");
-        assert_eq!(strip_bold_italic("*italic*"), "italic");
-        assert_eq!(strip_bold_italic("__bold__"), "bold");
-        assert_eq!(strip_bold_italic("_italic_"), "italic");
+        assert_eq!(strip_links("Visit [Google](https://google.com)"), "Visit Google");
+        assert_eq!(strip_bold_italic("**bold** *italic* __b__ _i_"), "bold italic b i");
+        assert_eq!(strip_blockquotes("> Quote text"), "Quote text");
     }
 
     #[test]
@@ -162,72 +139,32 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_blockquotes() {
-        assert_eq!(strip_blockquotes("> Quote"), "Quote");
-        assert_eq!(strip_blockquotes("> Quote text"), "Quote text");
-    }
+    fn strip_markdown_all_and_preserves_bold_italic_by_default() {
+        let default_cfg = crate::config::MarkdownSanitizationConfig::default();
+        let emph = "**bold**, __bold__, *italic*, and _italic_ text";
+        assert_eq!(strip_markdown(emph, &default_cfg), emph);
 
-    #[test]
-    fn test_strip_markdown_all() {
-        let mut config = crate::config::MarkdownSanitizationConfig::default();
-        config.strip_bold_italic = true;
-        let input = "# Title\n**bold** and *italic*\n- item\n> quote\n`code`";
-        let result = strip_markdown(input, &config);
+        let mut strip_all = default_cfg;
+        strip_all.strip_bold_italic = true;
+        let result = strip_markdown("# Title\n**bold** and *italic*\n- item\n> quote\n`code`", &strip_all);
         assert!(!result.contains('#'));
         assert!(!result.contains("**"));
         assert!(!result.contains('>'));
     }
 
     #[test]
-    fn test_strip_markdown_keeps_bold_italic_by_default() {
-        // Bold/italic markers are preserved by default (strip_bold_italic=false):
-        // some engines render and articulate them as spoken emphasis.
-        let config = crate::config::MarkdownSanitizationConfig::default();
-        let input = "**bold**, __bold__, *italic*, and _italic_ text";
-        let result = strip_markdown(input, &config);
-        assert_eq!(
-            result, input,
-            "Bold and italic markers should be preserved by default"
-        );
-    }
+    fn strip_markdown_respects_inline_code_and_code_block_toggles() {
+        let mut cfg = crate::config::MarkdownSanitizationConfig::default();
+        let inline = "Use `sudo` command";
+        cfg.strip_inline_code = false;
+        assert!(strip_markdown(inline, &cfg).contains('`'));
+        cfg.strip_inline_code = true;
+        assert!(!strip_markdown(inline, &cfg).contains('`'));
 
-    #[test]
-    fn test_strip_markdown_respects_inline_code_toggle() {
-        // With inline code stripping disabled (default), backtick content preserved
-        let mut config = crate::config::MarkdownSanitizationConfig::default();
-        config.strip_inline_code = false;
-        let input = "Use `sudo` command";
-        let result = strip_markdown(input, &config);
-        assert!(
-            result.contains('`'),
-            "Inline code should be preserved when strip_inline_code=false"
-        );
-
-        // With inline code stripping enabled
-        config.strip_inline_code = true;
-        let result = strip_markdown(input, &config);
-        assert!(
-            !result.contains('`'),
-            "Inline code should be removed when strip_inline_code=true"
-        );
-    }
-
-    #[test]
-    fn test_strip_markdown_respects_code_block_toggle() {
-        let mut config = crate::config::MarkdownSanitizationConfig::default();
-        config.strip_code_blocks = true;
-        let input = "Text\n```code```\nMore";
-        let result = strip_markdown(input, &config);
-        assert!(
-            !result.contains("```"),
-            "Code blocks should be removed when strip_code_blocks=true"
-        );
-
-        config.strip_code_blocks = false;
-        let result = strip_markdown(input, &config);
-        assert!(
-            result.contains("```"),
-            "Code blocks should be preserved when strip_code_blocks=false"
-        );
+        let fenced = "Text\n```code```\nMore";
+        cfg.strip_code_blocks = true;
+        assert!(!strip_markdown(fenced, &cfg).contains("```"));
+        cfg.strip_code_blocks = false;
+        assert!(strip_markdown(fenced, &cfg).contains("```"));
     }
 }

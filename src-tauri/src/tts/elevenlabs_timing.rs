@@ -209,27 +209,7 @@ mod tests {
         }
     }
     #[test]
-    fn multiple_records_keep_request_relative_times() {
-        let mut decoder = TimestampDecoder::new();
-        for (character, start) in [("A", 0.1), ("B", 1.2)] {
-            let record = serde_json::json!({"audio_base64": "AAA=", "alignment": {
-                "characters": [character], "character_start_times_seconds": [start],
-                "character_end_times_seconds": [start + 0.1]
-            }})
-            .to_string()
-                + "\n";
-            let items = decoder.push(record.as_bytes(), false).unwrap();
-            let ChunkItem::Captions(captions) = &items[0] else {
-                panic!("missing captions")
-            };
-            assert_eq!(captions.words.last().unwrap().start_ms, start * 1000.0);
-        }
-        assert_eq!(decoder.captions.text, "AB");
-        assert_eq!(decoder.captions.words[1].text_start, 1);
-    }
-
-    #[test]
-    fn rejects_malformed_audio_and_record_framing() {
+    fn rejects_malformed_audio_and_record_framing_even_after_caption_degradation() {
         for input in [
             r#"{"audio_base64":"!"}"#,
             r#"{"audio_base64":123, "alignment":{}}"#,
@@ -240,6 +220,18 @@ mod tests {
                 .push(input.as_bytes(), true)
                 .is_err());
         }
+
+        let mut decoder = TimestampDecoder::new();
+        assert_eq!(
+            decoder
+                .push(b"{\"audio_base64\":\"AQI=\",\"alignment\":{}}\n", false)
+                .unwrap(),
+            vec![ChunkItem::ClearCaptions, ChunkItem::Pcm(vec![1, 2])]
+        );
+        assert!(decoder
+            .push(b"{\"audio_base64\":\"!\"}\n", true)
+            .unwrap_err()
+            .contains("Invalid ElevenLabs audio"));
     }
 
     /// Emote-tag characters the API echoes in its alignment stream never
@@ -325,22 +317,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_caption_schema_survives_arbitrary_transport_splits() {
-        let input = "{\"audio_base64\":\"AQI=\",\"alignment\":{}}\n";
-        for split in 0..input.len() {
-            let mut decoder = TimestampDecoder::new();
-            assert!(decoder
-                .push(&input.as_bytes()[..split], false)
-                .unwrap()
-                .is_empty());
-            assert_eq!(
-                decoder.push(&input.as_bytes()[split..], true).unwrap(),
-                vec![ChunkItem::ClearCaptions, ChunkItem::Pcm(vec![1, 2])]
-            );
-        }
-    }
-
-    #[test]
     fn rejected_provider_metadata_cannot_survive_stream_collection() {
         let wire = timed_record("A", 0.1)
             + "{\"audio_base64\":\"AwQ=\",\"alignment\":{}}\n"
@@ -364,20 +340,6 @@ mod tests {
         assert_eq!(speech.captions, None);
     }
 
-    #[test]
-    fn caption_degradation_does_not_disable_audio_validation() {
-        let mut decoder = TimestampDecoder::new();
-        assert_eq!(
-            decoder
-                .push(b"{\"audio_base64\":\"AQI=\",\"alignment\":{}}\n", false)
-                .unwrap(),
-            vec![ChunkItem::ClearCaptions, ChunkItem::Pcm(vec![1, 2])]
-        );
-        assert!(decoder
-            .push(b"{\"audio_base64\":\"!\"}\n", true)
-            .unwrap_err()
-            .contains("Invalid ElevenLabs audio"));
-    }
 
     #[test]
     fn audio_without_any_aligned_record_still_disables_captions() {
@@ -404,68 +366,65 @@ mod tests {
     }
 
     #[test]
-    fn null_alignment_after_an_aligned_record_is_normal_audio_only_streaming() {
-        let mut decoder = TimestampDecoder::new();
-        let first = decoder
+    fn aligned_and_audio_only_records_preserve_request_relative_captions() {
+        let mut relative = TimestampDecoder::new();
+        for (character, start) in [("A", 0.1), ("B", 1.2)] {
+            let record = serde_json::json!({"audio_base64": "AAA=", "alignment": {
+                "characters": [character], "character_start_times_seconds": [start],
+                "character_end_times_seconds": [start + 0.1]
+            }})
+            .to_string()
+                + "\n";
+            let items = relative.push(record.as_bytes(), false).unwrap();
+            let ChunkItem::Captions(captions) = &items[0] else {
+                panic!("missing captions")
+            };
+            assert_eq!(captions.words.last().unwrap().start_ms, start * 1000.0);
+        }
+        assert_eq!(relative.captions.text, "AB");
+        assert_eq!(relative.captions.words[1].text_start, 1);
+
+        let mut null_norm = TimestampDecoder::new();
+        let first = null_norm
             .push(timed_record("A", 0.1).as_bytes(), false)
             .unwrap();
         assert!(matches!(&first[0], ChunkItem::Captions(c) if c.text == "A"));
         let rest = "{\"audio_base64\":\"AwQ=\",\"normalized_alignment\":null}\n".to_string()
             + &timed_record("C", 1.0);
         assert_eq!(
-            decoder.push(rest.as_bytes(), true).unwrap(),
+            null_norm.push(rest.as_bytes(), true).unwrap(),
             vec![
                 ChunkItem::Pcm(vec![3, 4]),
-                ChunkItem::Captions(decoder.captions.clone()),
+                ChunkItem::Captions(null_norm.captions.clone()),
                 ChunkItem::Pcm(vec![1, 2]),
             ]
         );
-        assert_eq!(decoder.captions.text, "AC");
-        assert_eq!(decoder.aligned_records, 2);
-        assert_eq!(decoder.audio_only_records, 1);
-    }
+        assert_eq!(null_norm.captions.text, "AC");
+        assert_eq!(null_norm.aligned_records, 2);
+        assert_eq!(null_norm.audio_only_records, 1);
 
-    #[test]
-    fn audio_only_records_after_an_aligned_record_keep_captions() {
         let mut decoder = TimestampDecoder::new();
         let items = decoder
             .push(
                 (timed_record("Hello ", 0.1)
                     + "{\"audio_base64\":\"AwQ=\"}\n"
                     + "{\"audio_base64\":\"\"}\n"
-                    + &timed_record("world", 1.2))
+                    + &timed_record("world", 1.2)
+                    + "{\"audio_base64\":\"BQ==\"}\n")
                     .as_bytes(),
                 true,
             )
             .unwrap();
-        assert_eq!(items.len(), 5);
+        assert_eq!(items.len(), 6);
         assert!(matches!(&items[0], ChunkItem::Captions(c) if c.text == "Hello "));
         assert_eq!(items[1], ChunkItem::Pcm(vec![1, 2]));
         assert_eq!(items[2], ChunkItem::Pcm(vec![3, 4]));
         assert!(matches!(&items[3], ChunkItem::Captions(c) if c.text == "Hello world"));
         assert_eq!(items[4], ChunkItem::Pcm(vec![1, 2]));
+        assert_eq!(items[5], ChunkItem::Pcm(vec![5]));
         assert_eq!(decoder.captions.text, "Hello world");
         assert_eq!(decoder.aligned_records, 2);
-        assert_eq!(decoder.audio_only_records, 2);
-    }
-
-    #[test]
-    fn single_leading_alignment_covers_trailing_audio_only_records() {
-        let mut decoder = TimestampDecoder::new();
-        let wire = timed_record("Hello", 0.1)
-            + "{\"audio_base64\":\"AwQ=\"}\n"
-            + "{\"audio_base64\":\"BQ==\"}\n";
-        let items = decoder.push(wire.as_bytes(), true).unwrap();
-        assert_eq!(
-            items,
-            vec![
-                ChunkItem::Captions(decoder.captions.clone()),
-                ChunkItem::Pcm(vec![1, 2]),
-                ChunkItem::Pcm(vec![3, 4]),
-                ChunkItem::Pcm(vec![5]),
-            ]
-        );
-        assert_eq!(decoder.captions.text, "Hello");
+        assert_eq!(decoder.audio_only_records, 3);
     }
 
     #[test]

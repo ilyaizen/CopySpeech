@@ -1,5 +1,7 @@
-import { expect, it, vi } from "vite-plus/test";
-import { fireEvent, render } from "@testing-library/svelte";
+// @vitest-environment jsdom
+
+import { afterEach, beforeAll, expect, it, vi } from "vite-plus/test";
+import { cleanup, fireEvent, render } from "@testing-library/svelte";
 import { waitForI18nReady } from "#lib/i18n";
 import RecentHistory from "../recent-history.svelte";
 import { historyStore } from "#lib/stores/history-store.svelte.js";
@@ -26,8 +28,13 @@ vi.mock("#lib/stores/history-store.svelte.js", () => ({
   }
 }));
 
-it("shows three text-first readings without intercepting scrolling, and separates restore from play", async () => {
+beforeAll(async () => {
   await waitForI18nReady();
+});
+
+afterEach(() => cleanup());
+
+it("shows three text-first readings without intercepting scrolling, and separates restore from play", async () => {
   const onRestore = vi.fn().mockResolvedValue(undefined);
   const view = render(RecentHistory, { compact: true, onRestore });
   expect(view.getAllByRole("listitem")).toHaveLength(3);
@@ -44,11 +51,9 @@ it("shows three text-first readings without intercepting scrolling, and separate
   await fireEvent.click(view.getAllByRole("button", { name: "Play" })[0]);
   expect(historyStore.playEntry).toHaveBeenCalledWith("0");
   expect(onRestore).toHaveBeenCalledTimes(1);
-  view.unmount();
 });
 
 it("searches full history and bulk-selects only visible readings", async () => {
-  await waitForI18nReady();
   const view = render(RecentHistory, { limit: Infinity });
   expect(view.getAllByRole("listitem")).toHaveLength(5);
   await fireEvent.input(view.getByRole("searchbox"), { target: { value: "Reading 4" } });
@@ -62,5 +67,4 @@ it("searches full history and bulk-selects only visible readings", async () => {
   expect(view.getByRole("button", { name: "Delete selected (0)" }).hasAttribute("disabled")).toBe(
     true
   );
-  view.unmount();
 });

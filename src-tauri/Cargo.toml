@@ -35,7 +35,6 @@ gtk-layer-shell = { version = "0.8.2", features = ["v0_6"] }
 wl-clipboard-rs = "0.9"
 
 [dev-dependencies]
-wiremock = "0.6"
 # Features are additive with the main tokio dependency; these enable #[tokio::test].
 tokio = { version = "1", features = ["macros", "rt"] }
 

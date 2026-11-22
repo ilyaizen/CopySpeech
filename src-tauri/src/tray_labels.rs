@@ -131,16 +131,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_locale_falls_back_to_english() {
+    fn supported_locale_uses_its_catalog_and_unknown_falls_back_to_english() {
         let fallback = labels_for("xx");
         let english = labels_for("en");
         assert_eq!(fallback.listening, english.listening);
         assert_eq!(fallback.quit, english.quit);
         assert_eq!(english.quit, "Quit");
-    }
 
-    #[test]
-    fn supported_locale_uses_its_own_catalog() {
         let de = catalog("de").expect("de catalog is bundled");
         assert_eq!(labels_for("de").quit, lookup(&de, "quit").unwrap());
     }

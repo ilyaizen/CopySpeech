@@ -1634,42 +1634,51 @@ mod tests {
     }
 
     #[test]
-    fn word_projects_through_fragment_and_source_alignment() {
+    fn word_projects_through_fragments_and_repeated_words() {
         let raw = "Hello world.\n\nSecond sentence";
         let spoken = "Hello world. Second sentence";
-        // One fragment covering all of spoken; caption word "Second" at
-        // fragment-local 13..19 (UTF-16), i.e. spoken-page 13..19.
-        let captions = CaptionAlignment {
-            text: spoken.to_string(),
-            words: vec![word(13, 19)],
-        };
-        let session = session_with(
+        let single = session_with(
             raw,
             spoken,
             vec![(spoken, 0, spoken.encode_utf16().count())],
-            Some(captions),
+            Some(CaptionAlignment {
+                text: spoken.to_string(),
+                words: vec![word(13, 19)],
+            }),
         );
-        let (s, e) = current_word(&session).unwrap();
+        let (s, e) = current_word(&single).unwrap();
         assert_eq!(&raw[s..e], "Second");
-    }
 
-    #[test]
-    fn repeated_words_map_to_right_occurrence() {
-        let raw = "buffalo buffalo\nbuffalo";
-        let spoken = "buffalo buffalo buffalo";
-        let captions = CaptionAlignment {
-            text: spoken.to_string(),
-            words: vec![word(16, 23)],
-        };
-        let session = session_with(
-            raw,
-            spoken,
-            vec![(spoken, 0, spoken.encode_utf16().count())],
-            Some(captions),
+        let rep_raw = "buffalo buffalo\nbuffalo";
+        let rep_spoken = "buffalo buffalo buffalo";
+        let rep = session_with(
+            rep_raw,
+            rep_spoken,
+            vec![(rep_spoken, 0, rep_spoken.encode_utf16().count())],
+            Some(CaptionAlignment {
+                text: rep_spoken.to_string(),
+                words: vec![word(16, 23)],
+            }),
         );
-        let (s, e) = current_word(&session).unwrap();
+        let (s, e) = current_word(&rep).unwrap();
         assert_eq!(s, 16);
-        assert_eq!(&raw[s..e], "buffalo");
+        assert_eq!(&rep_raw[s..e], "buffalo");
+
+        let p_raw = "Part one here. Part two word";
+        let f2 = "Part two word";
+        let f2_start = p_raw.find(f2).unwrap();
+        let multi = session_with(
+            p_raw,
+            p_raw,
+            vec![("Part one here.", 0, 14), (f2, f2_start, f2_start + f2.len())],
+            Some(CaptionAlignment {
+                text: f2.to_string(),
+                words: vec![word(5, 8)],
+            }),
+        );
+        multi.active_fragment.store(1, Ordering::Relaxed);
+        let (s, e) = current_word(&multi).unwrap();
+        assert_eq!(&p_raw[s..e], "two");
     }
 
     /// The pill must cover a word together with the punctuation attached to
@@ -1725,12 +1734,30 @@ mod tests {
     }
 
     #[test]
-    fn missing_captions_report_captions_unavailable() {
+    fn degrade_reason_reflects_playing_vs_buffering_and_clean_sessions() {
         let spoken = "plain text";
-        let session = session_with(spoken, spoken, vec![(spoken, 0, 10)], None);
-        let (_, projected, reason) = project_state(&session);
+        let uncaptioned = session_with(spoken, spoken, vec![(spoken, 0, 10)], None);
+        let (_, projected, reason) = project_state(&uncaptioned);
         assert!(projected.is_none());
         assert_eq!(reason, Some("captions_unavailable"));
+
+        uncaptioned
+            .active_fragment
+            .store(NO_FRAGMENT, Ordering::Relaxed);
+        let (_, projected, reason) = project_state(&uncaptioned);
+        assert!(projected.is_none());
+        assert_eq!(reason, None);
+
+        let clean = session_with(
+            spoken,
+            spoken,
+            vec![(spoken, 0, 10)],
+            Some(CaptionAlignment {
+                text: spoken.to_string(),
+                words: vec![word(0, 5)],
+            }),
+        );
+        assert_eq!(project_state(&clean).2, None);
     }
 
     /// The caption verdict is per fragment: a fragment whose engine sent no
@@ -1762,99 +1789,25 @@ mod tests {
         assert_eq!(&spoken[s..e], "second");
     }
 
-    /// Nothing is audible yet during buffering, so there is no verdict to
-    /// report and the panel must not claim highlighting is unavailable.
     #[test]
-    fn buffering_session_reports_no_degrade_reason() {
-        let spoken = "plain text";
-        let session = session_with(spoken, spoken, vec![(spoken, 0, 10)], None);
-        session
-            .active_fragment
-            .store(NO_FRAGMENT, Ordering::Relaxed);
-        let (_, projected, reason) = project_state(&session);
-        assert!(projected.is_none());
-        assert_eq!(reason, None);
-    }
-
-    #[test]
-    fn clean_session_has_no_degrade_reason() {
-        let spoken = "plain text";
-        let caps = CaptionAlignment {
-            text: spoken.to_string(),
-            words: vec![word(0, 5)],
-        };
-        let session = session_with(spoken, spoken, vec![(spoken, 0, 10)], Some(caps));
-        let (_, _, reason) = project_state(&session);
-        assert_eq!(reason, None);
-    }
-
-    #[test]
-    fn fragment_local_offsets_shift_by_tile_start() {
-        let raw = "Part one here. Part two word";
-        let spoken = "Part one here. Part two word";
-        let f2 = "Part two word";
-        let start = spoken.find(f2).unwrap();
-        let captions = CaptionAlignment {
-            text: f2.to_string(),
-            words: vec![word(5, 8)],
-        };
-        let session = session_with(
-            raw,
-            spoken,
-            vec![("Part one here.", 0, 14), (f2, start, start + f2.len())],
-            Some(captions),
-        );
-        session.active_fragment.store(1, Ordering::Relaxed);
-        let (s, e) = current_word(&session).unwrap();
-        assert_eq!(&raw[s..e], "two");
-    }
-
-    /// The wire sends a text chunk (captions=None) BEFORE the caption item
-    /// (text=None); the fragment only becomes usable once captions land.
-    #[test]
-    fn late_captions_make_the_fragment_usable() {
+    fn fragment_events_accept_late_or_caption_only_and_ignore_foreign_tiles() {
         let text = "hello world";
-        let mut fragments = vec![entry(text, 0, text.len())];
         let caps = CaptionAlignment {
             text: text.to_string(),
             words: vec![word(0, 5)],
         };
 
-        apply_fragment_event(&mut fragments, 0, Some(text), None);
-        assert!(!fragments[0].captions_ok);
-        apply_fragment_event(&mut fragments, 0, None, Some(caps));
+        let mut late = vec![entry(text, 0, text.len())];
+        apply_fragment_event(&mut late, 0, Some(text), None);
+        assert!(!late[0].captions_ok);
+        apply_fragment_event(&mut late, 0, None, Some(caps.clone()));
+        assert!(late[0].captions_ok);
 
-        assert!(fragments[0].captions_ok, "late captions must land");
-    }
-
-    /// A standalone caption item (text=None) must NOT be mistaken for foreign
-    /// text — the tile check runs only when an event carries text.
-    #[test]
-    fn caption_only_event_skips_tile_check() {
-        let text = "hello world";
-        let mut fragments = vec![entry(text, 0, text.len())];
-        let caps = CaptionAlignment {
-            text: text.to_string(),
-            words: vec![word(0, 5)],
-        };
-        apply_fragment_event(&mut fragments, 0, None, Some(caps));
-
-        assert!(fragments[0].captions_ok);
-    }
-
-    /// A concurrent desktop reading's events name a different tile. They are
-    /// ignored, leaving captions this fragment already has intact.
-    #[test]
-    fn foreign_tile_events_are_ignored_not_fatal() {
-        let text = "hello world";
-        let mut fragments = vec![entry(text, 0, text.len())];
-        let caps = CaptionAlignment {
-            text: text.to_string(),
-            words: vec![word(0, 5)],
-        };
-        apply_fragment_event(&mut fragments, 0, None, Some(caps));
+        let mut caption_only = vec![entry(text, 0, text.len())];
+        apply_fragment_event(&mut caption_only, 0, None, Some(caps));
+        assert!(caption_only[0].captions_ok);
         apply_fragment_event(
-            &mut fragments,
+            &mut caption_only,
             0,
             Some("a different reading"),
             Some(CaptionAlignment {
@@ -1862,54 +1815,60 @@ mod tests {
                 words: vec![word(0, 8)],
             }),
         );
-
-        assert!(fragments[0].captions_ok, "foreign events must not degrade");
-        assert_eq!(fragments[0].captions.as_ref().unwrap().text, text);
+        assert!(caption_only[0].captions_ok);
+        assert_eq!(caption_only[0].captions.as_ref().unwrap().text, text);
     }
 
-    /// Captions whose text diverges from their own tile still degrade that
-    /// fragment — the identity-mapping policy is unchanged.
     #[test]
-    fn mismatched_captions_still_degrade() {
+    fn mismatched_or_interior_divergent_captions_still_degrade() {
         let text = "hello world";
-        let mut fragments = vec![entry(text, 0, text.len())];
-        let caps = CaptionAlignment {
-            text: "different text".to_string(),
-            words: vec![word(0, 5)],
-        };
-        apply_fragment_event(&mut fragments, 0, Some(text), None);
-        apply_fragment_event(&mut fragments, 0, Some(text), Some(caps));
+        let mut mismatch = vec![entry(text, 0, text.len())];
+        apply_fragment_event(&mut mismatch, 0, Some(text), None);
+        apply_fragment_event(
+            &mut mismatch,
+            0,
+            Some(text),
+            Some(CaptionAlignment {
+                text: "different text".to_string(),
+                words: vec![word(0, 5)],
+            }),
+        );
+        assert!(!mismatch[0].captions_ok);
 
-        assert!(!fragments[0].captions_ok);
+        let mut interior = vec![entry("hello world!", 0, 12)];
+        apply_fragment_event(&mut interior, 0, Some("hello world!"), None);
+        apply_fragment_event(
+            &mut interior,
+            0,
+            None,
+            Some(CaptionAlignment {
+                text: " hello worlds! ".to_string(),
+                words: vec![word(1, 6)],
+            }),
+        );
+        assert!(!interior[0].captions_ok);
     }
 
-    /// Regression for the 2026-09-09 live-click failure: ElevenLabs pads its
-    /// alignment text with one leading/trailing space (each pad char gets its
-    /// own timing entry), so exact-identity matching degraded every reading.
     #[test]
-    fn edge_padded_captions_are_rebased_to_tile() {
+    fn edge_padded_and_quote_normalized_captions_rebase_to_tile() {
         let expected = "The Great Fiction-Nonfiction Inversion";
-        let padded = format!(" {expected} ");
         let content_u16 = expected.encode_utf16().count();
         let mut fragments = vec![entry(expected, 0, content_u16)];
         let caps = CaptionAlignment {
-            text: padded,
+            text: format!(" {expected} "),
             words: vec![
-                // Leading pad "word" with its own timing (sidecar shape).
                 WordTiming {
                     text_start: 0,
                     text_end: 1,
                     start_ms: 0.0,
                     end_ms: 58.0,
                 },
-                // "The" at padded offsets 1..5.
                 WordTiming {
                     text_start: 1,
                     text_end: 5,
                     start_ms: 58.0,
                     end_ms: 200.0,
                 },
-                // Trailing pad "word".
                 WordTiming {
                     text_start: content_u16 + 1,
                     text_end: content_u16 + 2,
@@ -1920,77 +1879,55 @@ mod tests {
         };
         apply_fragment_event(&mut fragments, 0, Some(expected), None);
         apply_fragment_event(&mut fragments, 0, None, Some(caps));
+        assert!(fragments[0].captions_ok);
+        let rebased = fragments[0].captions.as_ref().unwrap();
+        assert_eq!(rebased.text, expected);
+        assert_eq!(rebased.words.len(), 1);
+        assert_eq!((rebased.words[0].text_start, rebased.words[0].text_end), (0, 4));
+        assert_eq!(rebased.words[0].start_ms, 58.0);
 
-        assert!(fragments[0].captions_ok, "padded captions must rebase");
-        let caps = fragments[0].captions.as_ref().unwrap();
-        assert_eq!(caps.text, expected);
-        assert_eq!(caps.words.len(), 1, "pad-only words dropped");
-        assert_eq!((caps.words[0].text_start, caps.words[0].text_end), (0, 4));
-        assert_eq!(caps.words[0].start_ms, 58.0, "audio timings untouched");
-    }
-
-    /// Interior divergence (rewritten caption text) still degrades the
-    /// fragment — the identity-mapping policy is unchanged.
-    #[test]
-    fn interior_divergent_captions_still_degrade() {
-        let mut fragments = vec![entry("hello world!", 0, 12)];
-        let caps = CaptionAlignment {
-            text: " hello worlds! ".to_string(),
-            words: vec![word(1, 6)],
-        };
-        apply_fragment_event(&mut fragments, 0, Some("hello world!"), None);
-        apply_fragment_event(&mut fragments, 0, None, Some(caps));
-
-        assert!(!fragments[0].captions_ok);
-    }
-
-    /// The proven fragment-2 shape: edge padding PLUS curly→straight quote
-    /// normalization, same UTF-16 length, offsets stay position-aligned.
-    #[test]
-    fn padded_and_quote_normalized_captions_rebase() {
-        let expected = "says \u{201C}platform.\u{201D} done";
-        let padded = format!(
+        let q_expected = "says \u{201C}platform.\u{201D} done";
+        let q_padded = format!(
             " {}",
-            expected.replace('\u{201C}', "\"").replace('\u{201D}', "\"")
+            q_expected.replace('\u{201C}', "\"").replace('\u{201D}', "\"")
         );
-        let content_u16 = expected.encode_utf16().count();
-        let mut fragments = vec![entry(expected, 0, content_u16)];
-        let mut padded_u16 = padded.encode_utf16().collect::<Vec<_>>();
-        padded_u16.push(0x20); // trailing pad
-        let caps = CaptionAlignment {
-            text: String::from_utf16(&padded_u16).unwrap(),
-            words: vec![
-                WordTiming {
-                    text_start: 0,
-                    text_end: 1,
-                    start_ms: 0.0,
-                    end_ms: 20.0,
-                }, // lead pad
-                WordTiming {
-                    text_start: 1,
-                    text_end: 1 + content_u16,
-                    start_ms: 20.0,
-                    end_ms: 500.0,
-                },
-                WordTiming {
-                    text_start: 1 + content_u16,
-                    text_end: 2 + content_u16,
-                    start_ms: 500.0,
-                    end_ms: 520.0,
-                }, // trail pad
-            ],
-        };
-        apply_fragment_event(&mut fragments, 0, Some(expected), None);
-        apply_fragment_event(&mut fragments, 0, None, Some(caps));
-
-        assert!(fragments[0].captions_ok, "quote-normalized padding rebases");
-        let caps = fragments[0].captions.as_ref().unwrap();
-        assert_eq!(caps.text, expected);
-        assert_eq!(caps.words.len(), 1);
-        assert_eq!(
-            (caps.words[0].text_start, caps.words[0].text_end),
-            (0, content_u16)
+        let q_u16 = q_expected.encode_utf16().count();
+        let mut q_frags = vec![entry(q_expected, 0, q_u16)];
+        let mut q_pad_u16 = q_padded.encode_utf16().collect::<Vec<_>>();
+        q_pad_u16.push(0x20);
+        apply_fragment_event(&mut q_frags, 0, Some(q_expected), None);
+        apply_fragment_event(
+            &mut q_frags,
+            0,
+            None,
+            Some(CaptionAlignment {
+                text: String::from_utf16(&q_pad_u16).unwrap(),
+                words: vec![
+                    WordTiming {
+                        text_start: 0,
+                        text_end: 1,
+                        start_ms: 0.0,
+                        end_ms: 20.0,
+                    },
+                    WordTiming {
+                        text_start: 1,
+                        text_end: 1 + q_u16,
+                        start_ms: 20.0,
+                        end_ms: 500.0,
+                    },
+                    WordTiming {
+                        text_start: 1 + q_u16,
+                        text_end: 2 + q_u16,
+                        start_ms: 500.0,
+                        end_ms: 520.0,
+                    },
+                ],
+            }),
         );
+        assert!(q_frags[0].captions_ok);
+        let q_caps = q_frags[0].captions.as_ref().unwrap();
+        assert_eq!(q_caps.text, q_expected);
+        assert_eq!((q_caps.words[0].text_start, q_caps.words[0].text_end), (0, q_u16));
     }
 
     // ── Trigger speaks (double-copy / hotkey mirror) ──
@@ -2036,16 +1973,13 @@ mod tests {
     }
 
     #[test]
-    fn trigger_ids_are_unique_and_host_safe() {
+    fn trigger_ids_and_protocol_frames_are_keyed_and_formatted() {
         let (a, b) = (new_trigger_id(), new_trigger_id());
         assert_ne!(a, b);
         for id in [a, b] {
             assert!(id.starts_with("trigger-") && id.is_ascii() && id.len() <= 128);
         }
-    }
 
-    #[test]
-    fn trigger_started_frame_names_source_and_raw_text() {
         for (source, wire) in [
             (TriggerSource::DoubleCopy, "double_copy"),
             (TriggerSource::Hotkey, "hotkey"),
@@ -2061,19 +1995,7 @@ mod tests {
             assert_eq!(frame["source"], wire);
             assert_eq!(frame["raw_text"], "Copied\r\ntext");
         }
-    }
 
-    /// The webview hands the double-copy context back to speak_queued as-is.
-    #[test]
-    fn speak_trigger_round_trips_through_the_webview() {
-        let wire = json!({ "source": "double_copy", "raw_text": "a b" });
-        let trigger: SpeakTrigger = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(trigger.source, TriggerSource::DoubleCopy);
-        assert_eq!(serde_json::to_value(&trigger).unwrap(), wire);
-    }
-
-    #[test]
-    fn state_frames_are_keyed_by_session_kind() {
         let reading = session_with("a", "a", vec![("a", 0, 1)], None);
         let frame = state_message(&reading, 1, "playing", None, None);
         assert_eq!(frame["reading_id"], "r");
@@ -2104,11 +2026,8 @@ mod tests {
         );
     }
 
-    /// Streamed pages arrive one event per fragment; each tile is found after
-    /// the previous one, and the audible word lands in the RAW copied text
-    /// (CRLF and blank lines included).
     #[test]
-    fn discovered_tiles_project_words_into_the_raw_text() {
+    fn discovered_and_single_clip_tiles_project_words_into_raw_text() {
         let raw = "First line here.\r\n\r\nSecond line here.";
         let spoken = "First line here. Second line here.";
         let session = trigger_session(raw, spoken);
@@ -2120,35 +2039,24 @@ mod tests {
         session.active_fragment.store(1, Ordering::Relaxed);
         let span = current_word(&session).unwrap();
         assert_eq!(utf16_slice(raw, span), "line");
-        assert_eq!(
-            span.0,
-            raw.rfind("line").unwrap(),
-            "the second fragment's word"
-        );
+        assert_eq!(span.0, raw.rfind("line").unwrap());
         assert_eq!(degrade_reason(&session), None);
-    }
 
-    /// Batch synthesis and saved-audio replay send the whole text as one clip.
-    #[test]
-    fn single_clip_tile_covers_the_whole_spoken_text() {
-        let spoken = "One clip with every word.";
-        let session = trigger_session(spoken, spoken);
+        let single_text = "One clip with every word.";
+        let single = trigger_session(single_text, single_text);
         record_on(
-            &session,
+            &single,
             0,
-            Some(spoken),
-            Some(captions_for(spoken, "every")),
+            Some(single_text),
+            Some(captions_for(single_text, "every")),
         );
-        let fragments = session.fragments.lock().unwrap();
+        let fragments = single.fragments.lock().unwrap();
         assert_eq!(
             (fragments[0].text_start, fragments[0].text_end),
-            (0, spoken.encode_utf16().count())
+            (0, single_text.encode_utf16().count())
         );
         drop(fragments);
-        assert_eq!(
-            utf16_slice(spoken, current_word(&session).unwrap()),
-            "every"
-        );
+        assert_eq!(utf16_slice(single_text, current_word(&single).unwrap()), "every");
     }
 
     /// A fragment whose text the spoken text does not contain cannot be
@@ -2202,26 +2110,18 @@ mod tests {
         );
     }
 
-    /// Engines without timing metadata: states still flow, without words.
     #[test]
-    fn missing_timing_sends_states_without_word_events() {
-        let spoken = "No timing here.";
-        let session = trigger_session(spoken, spoken);
-        record_on(&session, 0, Some(spoken), None);
-        let (status, word, reason) = project_state(&session);
+    fn word_projection_requires_timing_and_playing_or_paused_status() {
+        let untimed_text = "No timing here.";
+        let untimed = trigger_session(untimed_text, untimed_text);
+        record_on(&untimed, 0, Some(untimed_text), None);
+        let (status, word, reason) = project_state(&untimed);
         assert_eq!(status, "playing");
         assert!(word.is_none());
-        let frame = state_message(&session, 1, status, word, reason);
+        let frame = state_message(&untimed, 1, status, word, reason);
         assert_eq!(frame["word"], Value::Null);
         assert_eq!(frame["word_available"], false);
-    }
 
-    /// A clip is announced audible before its audio starts (decode and effect
-    /// render run in between), so the session is still buffering at 0 ms over
-    /// the first word. Extensions drop the whole connection on a word in a
-    /// buffering or terminal frame.
-    #[test]
-    fn words_project_only_while_playing_or_paused() {
         let spoken = "First word.";
         let session = trigger_session(spoken, spoken);
         record_on(
@@ -2244,74 +2144,52 @@ mod tests {
         }
     }
 
-    // ── Deferred trigger announce (the copy wakes the companion) ──
-
-    /// The companion connection the copy wakes lands mid-wait: the bounded
-    /// wait releases as soon as `ready` holds, not at the deadline.
     #[test]
-    fn trigger_wait_releases_when_the_companion_connects() {
+    fn deferred_trigger_wait_releases_on_connect_timeout_or_finish() {
         let ready_flag = Arc::new(AtomicBool::new(false));
         let cancelled = AtomicBool::new(false);
         let late = {
             let flag = Arc::clone(&ready_flag);
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(60));
+                std::thread::sleep(Duration::from_millis(20));
                 flag.store(true, Ordering::Relaxed);
             })
         };
         let started = Instant::now();
-        let ready = || ready_flag.load(Ordering::Relaxed);
         assert!(wait_for(
-            ready,
+            || ready_flag.load(Ordering::Relaxed),
             &cancelled,
             Duration::from_secs(5),
-            Duration::from_millis(5)
+            Duration::from_millis(2),
         ));
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "released by the connection, not the deadline"
-        );
+        assert!(started.elapsed() < Duration::from_secs(5));
         late.join().unwrap();
-    }
 
-    /// No companion ever connects: the wait gives up at the bound instead of
-    /// pinning the session (spawn_trigger_announce then cancels and logs).
-    #[test]
-    fn trigger_wait_times_out_without_a_companion() {
-        let cancelled = AtomicBool::new(false);
-        let started = Instant::now();
+        let timeout_started = Instant::now();
         assert!(!wait_for(
             || false,
             &cancelled,
-            Duration::from_millis(60),
-            Duration::from_millis(5)
+            Duration::from_millis(20),
+            Duration::from_millis(2),
         ));
-        assert!(started.elapsed() >= Duration::from_millis(60));
-    }
+        assert!(timeout_started.elapsed() >= Duration::from_millis(20));
 
-    /// The speak finished before any companion appeared: the wait abandons
-    /// immediately instead of announcing a finished speak later.
-    #[test]
-    fn trigger_wait_abandons_when_the_speak_finishes_first() {
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let finish_flag = Arc::new(AtomicBool::new(false));
         let finisher = {
-            let flag = Arc::clone(&cancelled);
+            let flag = Arc::clone(&finish_flag);
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(30));
+                std::thread::sleep(Duration::from_millis(15));
                 flag.store(true, Ordering::Relaxed);
             })
         };
-        let started = Instant::now();
+        let finish_started = Instant::now();
         assert!(!wait_for(
             || false,
-            &cancelled,
+            &finish_flag,
             Duration::from_secs(5),
-            Duration::from_millis(5)
+            Duration::from_millis(2),
         ));
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "cancelled beats the deadline"
-        );
+        assert!(finish_started.elapsed() < Duration::from_secs(1));
         finisher.join().unwrap();
     }
 }

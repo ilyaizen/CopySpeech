@@ -1,5 +1,7 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vite-plus/test";
-import { render, waitFor } from "@testing-library/svelte";
+// @vitest-environment jsdom
+
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { cleanup, render, waitFor } from "@testing-library/svelte";
 import { waitForI18nReady } from "#lib/i18n";
 import HistoryRoute from "../+page.svelte";
 import { goto } from "$app/navigation";
@@ -35,49 +37,37 @@ function makeConfig(experimental: boolean, history: boolean) {
   };
 }
 
+beforeAll(async () => {
+  await waitForI18nReady();
+});
+
 describe("history route experimental gating", () => {
-  beforeEach(async () => {
-    await waitForI18nReady();
+  beforeEach(() => {
     vi.clearAllMocks();
   });
 
   afterEach(() => {
+    cleanup();
     vi.restoreAllMocks();
   });
 
-  it("renders history items when both experimental and history are enabled", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(makeConfig(true, true));
-    const view = render(HistoryRoute);
-
+  it("shows private history only when effective and otherwise redirects home without leaking data", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(makeConfig(false, true));
+    const gatedView = render(HistoryRoute);
     await waitFor(() => {
-      expect(view.queryByText(/Confidential User Reading/)).not.toBeNull();
+      expect(goto).toHaveBeenCalledWith("/", { replaceState: true });
+    });
+    expect(gatedView.queryByText(/Confidential User Reading/)).toBeNull();
+    expect(gatedView.queryByTestId("history-inactive")).not.toBeNull();
+    gatedView.unmount();
+
+    vi.clearAllMocks();
+    vi.mocked(invoke).mockResolvedValueOnce(makeConfig(true, true));
+    const allowedView = render(HistoryRoute);
+    await waitFor(() => {
+      expect(allowedView.queryByText(/Confidential User Reading/)).not.toBeNull();
     });
     expect(goto).not.toHaveBeenCalled();
-    expect(view.queryByTestId("history-inactive")).toBeNull();
-    view.unmount();
-  });
-
-  it("redirects home and shows no private saved data when experimental is off", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(makeConfig(false, true));
-    const view = render(HistoryRoute);
-
-    await waitFor(() => {
-      expect(goto).toHaveBeenCalledWith("/", { replaceState: true });
-    });
-    expect(view.queryByText(/Confidential User Reading/)).toBeNull();
-    expect(view.queryByTestId("history-inactive")).not.toBeNull();
-    view.unmount();
-  });
-
-  it("redirects home and shows no private saved data when history is off", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(makeConfig(true, false));
-    const view = render(HistoryRoute);
-
-    await waitFor(() => {
-      expect(goto).toHaveBeenCalledWith("/", { replaceState: true });
-    });
-    expect(view.queryByText(/Confidential User Reading/)).toBeNull();
-    expect(view.queryByTestId("history-inactive")).not.toBeNull();
-    view.unmount();
+    expect(allowedView.queryByTestId("history-inactive")).toBeNull();
   });
 });

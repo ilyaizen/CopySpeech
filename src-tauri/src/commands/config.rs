@@ -492,7 +492,7 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn winning_env_var_prefers_first_non_empty() {
+    fn env_key_source_resolution_precedence() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("COPYTEST_A", "   ");
         std::env::set_var("COPYTEST_B", "token");
@@ -506,17 +506,21 @@ mod tests {
         );
         std::env::remove_var("COPYTEST_A");
         std::env::remove_var("COPYTEST_B");
-    }
 
-    #[test]
-    fn winning_env_var_is_none_when_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("COPYTEST_UNSET");
         assert_eq!(winning_env_var(&["COPYTEST_UNSET"]), None);
+
+        std::env::set_var("FISH_API_KEY", "fish-token");
+        let sources = get_env_key_sources();
+        assert_eq!(
+            sources.get("fish").map(String::as_str),
+            Some("FISH_API_KEY")
+        );
+        std::env::remove_var("FISH_API_KEY");
     }
 
     #[test]
-    fn engine_env_table_covers_every_cloud_engine() {
+    fn engine_env_table_matches_api_key_accessors() {
         let engines: Vec<&str> = ENGINE_API_KEY_ENV_VARS
             .iter()
             .map(|(engine, _)| *engine)
@@ -534,29 +538,11 @@ mod tests {
                 "microsoft"
             ]
         );
-        for (_, env_names) in ENGINE_API_KEY_ENV_VARS {
-            assert!(!env_names.is_empty());
-        }
-    }
-
-    #[test]
-    fn tts_api_key_mut_targets_every_listed_engine() {
         let mut config = AppConfig::default();
-        for (engine, _) in ENGINE_API_KEY_ENV_VARS {
+        for (engine, env_names) in ENGINE_API_KEY_ENV_VARS {
+            assert!(!env_names.is_empty());
             assert!(tts_api_key_mut(&mut config, engine).is_some());
         }
         assert!(tts_api_key_mut(&mut config, "not-an-engine").is_none());
-    }
-
-    #[test]
-    fn get_env_key_sources_maps_set_env_vars() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("FISH_API_KEY", "fish-token");
-        let sources = get_env_key_sources();
-        assert_eq!(
-            sources.get("fish").map(String::as_str),
-            Some("FISH_API_KEY")
-        );
-        std::env::remove_var("FISH_API_KEY");
     }
 }

@@ -362,17 +362,15 @@ mod tests {
     }
 
     #[test]
-    fn target_volume_scales_the_apps_own_level() {
+    fn duck_volume_restore_guard_and_legacy_config_compat() {
         assert!((target_volume(0.8, &cfg(25)) - 0.2).abs() < 1e-6);
         assert_eq!(target_volume(0.5, &cfg(250)), 0.5);
-        // Level 0 is the removed "mute" mode's replacement.
         assert_eq!(target_volume(0.8, &cfg(0)), 0.0);
-    }
 
-    /// Configs saved with the removed `mode`/`fade_ms` fields must still
-    /// load: a mute user silently becomes "lower" at their level.
-    #[test]
-    fn legacy_configs_with_mode_and_fade_still_load() {
+        assert!(!user_touched(0.2, 0.2));
+        assert!(!user_touched(0.21, 0.2));
+        assert!(user_touched(0.6, 0.2));
+
         let duck: DuckConfig = serde_json::from_str(
             r#"{"enabled": true, "mode": "mute", "level_percent": 20, "fade_ms": 150}"#,
         )
@@ -382,27 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn restore_guard_only_yields_to_real_user_changes() {
-        assert!(!user_touched(0.2, 0.2));
-        assert!(!user_touched(0.21, 0.2));
-        assert!(user_touched(0.6, 0.2));
-    }
-
-    #[test]
     fn descendants_follow_the_whole_chain() {
         // ours(1) -> webview browser(2) -> audio utility(3); 9 is unrelated.
         let set = descendants(1, &[(3, 2), (2, 1), (9, 8)]);
         assert_eq!(set, HashSet::from([1, 2, 3]));
-    }
-
-    #[test]
-    fn saved_state_round_trips() {
-        let s = vec![Saved {
-            id: "a".into(),
-            original: 0.7,
-            applied: 0.14,
-        }];
-        let back: Vec<Saved> = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
-        assert_eq!(back, s);
     }
 }

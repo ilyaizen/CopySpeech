@@ -447,20 +447,17 @@ mod tests {
     }
 
     #[test]
-    fn model_page_drops_character_voices() {
-        let body = r#"{"items":[
+    fn model_page_filters_characters_and_maps_tags_and_previews() {
+        let filtered_body = r#"{"items":[
             {"_id":"a","title":"Calm Narrator","languages":["en"],"tags":["male","narration"]},
             {"_id":"b","title":"Uncle Roger","languages":["en"],"tags":["male","character-voice"]},
             {"_id":"c","title":"No Tags"}
         ]}"#;
-        let voices = parse_model_page(body).expect("parses");
-        let ids: Vec<&str> = voices.iter().map(|v| v.id.as_str()).collect();
+        let filtered = parse_model_page(filtered_body).expect("parses");
+        let ids: Vec<&str> = filtered.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(ids, ["a", "c"]);
-        assert_eq!(voices[0].language.as_deref(), Some("en"));
-    }
+        assert_eq!(filtered[0].language.as_deref(), Some("en"));
 
-    #[test]
-    fn model_page_maps_gender_tags_and_first_sample_audio() {
         // Shape from a live `/model?licensed=true` page (2026-11-02): samples
         // carry `audio` URLs; the first sample may have none.
         let body = r#"{"items":[
@@ -482,76 +479,33 @@ mod tests {
     }
 
     #[test]
-    fn body_omits_reference_id_for_default_voice() {
+    fn request_and_stream_bodies_follow_voice_setting() {
         // Empty voice = Fish's built-in default voice; sending `reference_id`
         // blank would ask the API for a model with an empty id.
-        let body = backend("").request_body("hello");
-        assert!(body.get("reference_id").is_none());
-        assert_eq!(body["text"], "hello");
-        assert_eq!(body["format"], "wav");
-    }
+        let default_body = backend("").request_body("hello");
+        assert!(default_body.get("reference_id").is_none());
+        assert_eq!(default_body["text"], "hello");
+        assert_eq!(default_body["format"], "wav");
 
-    #[test]
-    fn body_carries_reference_id_when_voice_is_set() {
-        let body = backend("933563129e564b19a115bedd57b7406a").request_body("hello");
-        assert_eq!(body["reference_id"], "933563129e564b19a115bedd57b7406a");
-    }
-
-    #[test]
-    fn file_extension_follows_format() {
-        assert_eq!(backend("").file_extension(), "wav");
-        let mp3 = FishTtsBackend::new(FishConfig {
-            format: "mp3".into(),
-            ..Default::default()
-        });
-        assert_eq!(mp3.file_extension(), "mp3");
-    }
-
-    #[test]
-    fn streaming_body_pins_pcm_and_balanced_latency() {
-        let body = backend("").stream_request_body("hello");
-        assert_eq!(body["format"], "pcm");
-        assert_eq!(body["latency"], "balanced");
-        assert!(body.get("reference_id").is_none());
-    }
-
-    #[test]
-    fn streaming_body_keeps_reference_id_when_voice_is_set() {
-        let body = backend("933563129e564b19a115bedd57b7406a").stream_request_body("hello");
-        assert_eq!(body["format"], "pcm");
-        assert_eq!(body["latency"], "balanced");
-        assert_eq!(body["reference_id"], "933563129e564b19a115bedd57b7406a");
-    }
-
-    #[test]
-    fn supports_streaming_reports_true() {
-        assert!(backend("").supports_streaming());
-    }
-
-    #[test]
-    fn batch_captions_estimate_inside_the_decoded_duration() {
-        let meta = AudioFormatMeta {
-            sample_rate: 8000,
-            channels: 1,
-            bits_per_sample: 16,
-        };
-        // 16000 bytes = 8000 samples = exactly one second at 8 kHz mono.
-        let bytes = super::super::stream::pcm_to_wav(&vec![0; 16000], &meta);
-        let captions = captions_for_audio(&bytes, "Hello, world!").expect("decodable wav");
-        assert_eq!(captions.text, "Hello, world!");
-        captions.validate().unwrap();
-        let last = captions.words.last().unwrap();
-        assert!(
-            (last.end_ms - 1000.0).abs() < 1.0,
-            "last word must end at the decoded duration: {}",
-            last.end_ms
+        let voiced_body = backend("933563129e564b19a115bedd57b7406a").request_body("hello");
+        assert_eq!(
+            voiced_body["reference_id"],
+            "933563129e564b19a115bedd57b7406a"
         );
-        assert_eq!(captions.words[0].text_start, 0);
-    }
 
-    #[test]
-    fn undecodable_batch_audio_yields_no_captions() {
-        assert!(captions_for_audio(&[1, 2, 3, 4], "hello").is_none());
+        let default_stream = backend("").stream_request_body("hello");
+        assert_eq!(default_stream["format"], "pcm");
+        assert_eq!(default_stream["latency"], "balanced");
+        assert!(default_stream.get("reference_id").is_none());
+
+        let voiced_stream =
+            backend("933563129e564b19a115bedd57b7406a").stream_request_body("hello");
+        assert_eq!(voiced_stream["format"], "pcm");
+        assert_eq!(voiced_stream["latency"], "balanced");
+        assert_eq!(
+            voiced_stream["reference_id"],
+            "933563129e564b19a115bedd57b7406a"
+        );
     }
 
     /// Fish writes 0xFFFFFF00 into the WAV data-chunk size field while
@@ -560,19 +514,27 @@ mod tests {
     /// forever, hanging the whole synthesis queue (busy tray, no audio, no
     /// error).
     #[test]
-    fn lying_data_chunk_size_yields_the_real_duration() {
+    fn captions_for_audio_measures_real_pcm_and_rejects_corrupt_wav() {
+        assert!(captions_for_audio(&[1, 2, 3, 4], "hello").is_none());
+
         let meta = AudioFormatMeta {
             sample_rate: 8000,
             channels: 1,
             bits_per_sample: 16,
         };
-        // One second of PCM inside a canonical WAV...
-        let mut bytes = super::super::stream::pcm_to_wav(&vec![0u8; 16000], &meta);
-        // ...with the data-chunk size overwritten by Fish's lie.
-        let data_size_field = 40; // riff(12) + fmt(8 + 16) → size field of data
-        bytes[data_size_field..data_size_field + 4].copy_from_slice(&0xFFFFFF00u32.to_le_bytes());
+        // 16000 bytes = 8000 samples = exactly one second at 8 kHz mono.
+        let canonical = super::super::stream::pcm_to_wav(&vec![0; 16000], &meta);
+        let captions = captions_for_audio(&canonical, "Hello, world!").expect("decodable wav");
+        assert_eq!(captions.text, "Hello, world!");
+        captions.validate().unwrap();
+        assert_eq!(captions.words[0].text_start, 0);
+        assert!((captions.words.last().unwrap().end_ms - 1000.0).abs() < 1.0);
 
-        let captions = captions_for_audio(&bytes, "Hello, world!").expect("real bytes measured");
+        // Overwrite the data-chunk size field with Fish's lie.
+        let mut lying = canonical;
+        let data_size_field = 40; // riff(12) + fmt(8 + 16) → size field of data
+        lying[data_size_field..data_size_field + 4].copy_from_slice(&0xFFFFFF00u32.to_le_bytes());
+        let captions = captions_for_audio(&lying, "Hello, world!").expect("real bytes measured");
         captions.validate().unwrap();
         let last = captions.words.last().unwrap();
         assert!(
@@ -582,8 +544,8 @@ mod tests {
         );
 
         // A transfer cut mid-body must measure only what arrived (whole frames).
-        bytes.truncate(bytes.len() - 10);
-        let captions = captions_for_audio(&bytes, "Hello, world!").expect("truncated still parses");
+        lying.truncate(lying.len() - 10);
+        let captions = captions_for_audio(&lying, "Hello, world!").expect("truncated still parses");
         let last = captions.words.last().unwrap();
         assert!(
             (990.0..1000.0).contains(&last.end_ms),

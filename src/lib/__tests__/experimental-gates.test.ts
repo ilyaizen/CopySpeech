@@ -1,112 +1,77 @@
 import { describe, expect, test } from "vite-plus/test";
+import { effectiveEffect, type EffectGateConfig } from "#lib/effects-gate";
 import {
   isHistoryEffective,
-  isPostProcessEffective,
-  isHudEffective
+  isHudEffective,
+  isPostProcessEffective
 } from "#lib/experimental-gates";
 
-describe("isHistoryEffective", () => {
-  test("returns true when both experimental and history are enabled", () => {
-    expect(
-      isHistoryEffective({
-        general: { experimental_enabled: true },
-        history: { enabled: true }
-      })
-    ).toBe(true);
-  });
+describe("experimental master switch", () => {
+  test("gates history, post_process, and hud behind experimental_enabled", () => {
+    const cases = [
+      [
+        "history",
+        (exp: boolean | undefined, enabled: boolean) =>
+          isHistoryEffective({
+            general: exp === undefined ? {} : { experimental_enabled: exp },
+            history: { enabled }
+          }),
+        isHistoryEffective
+      ],
+      [
+        "post_process",
+        (exp: boolean | undefined, enabled: boolean) =>
+          isPostProcessEffective({
+            general: exp === undefined ? {} : { experimental_enabled: exp },
+            post_process: { enabled }
+          }),
+        isPostProcessEffective
+      ],
+      [
+        "hud",
+        (exp: boolean | undefined, enabled: boolean) =>
+          isHudEffective({
+            general: exp === undefined ? {} : { experimental_enabled: exp },
+            hud: { enabled }
+          }),
+        isHudEffective
+      ]
+    ] as const;
 
-  test("returns false when experimental is off even if history is enabled", () => {
-    expect(
-      isHistoryEffective({
-        general: { experimental_enabled: false },
-        history: { enabled: true }
-      })
-    ).toBe(false);
-  });
-
-  test("returns false when experimental is enabled but history is off", () => {
-    expect(
-      isHistoryEffective({
-        general: { experimental_enabled: true },
-        history: { enabled: false }
-      })
-    ).toBe(false);
-  });
-
-  test("returns false for legacy config where experimental was undefined", () => {
-    expect(
-      isHistoryEffective({
-        general: {},
-        history: { enabled: true }
-      })
-    ).toBe(false);
-  });
-
-  test("handles null or undefined config safely", () => {
-    expect(isHistoryEffective(null)).toBe(false);
-    expect(isHistoryEffective(undefined)).toBe(false);
-  });
-});
-
-describe("isPostProcessEffective", () => {
-  test("returns true when both experimental and post_process are enabled", () => {
-    expect(
-      isPostProcessEffective({
-        general: { experimental_enabled: true },
-        post_process: { enabled: true }
-      })
-    ).toBe(true);
-  });
-
-  test("returns false when experimental is off", () => {
-    expect(
-      isPostProcessEffective({
-        general: { experimental_enabled: false },
-        post_process: { enabled: true }
-      })
-    ).toBe(false);
-  });
-
-  test("returns false when post_process is off", () => {
-    expect(
-      isPostProcessEffective({
-        general: { experimental_enabled: true },
-        post_process: { enabled: false }
-      })
-    ).toBe(false);
+    for (const [name, check, rawCheck] of cases) {
+      expect(check(true, true), `${name} both true`).toBe(true);
+      expect(check(false, true), `${name} exp false`).toBe(false);
+      expect(check(true, false), `${name} feature false`).toBe(false);
+      expect(check(undefined, true), `${name} legacy exp undefined`).toBe(false);
+      expect(rawCheck(null), `${name} null`).toBe(false);
+      expect(rawCheck(undefined), `${name} undefined`).toBe(false);
+    }
   });
 });
 
-describe("isHudEffective", () => {
-  test("returns true when both experimental and hud are enabled", () => {
-    expect(
-      isHudEffective({
-        general: { experimental_enabled: true },
-        hud: { enabled: true }
-      })
-    ).toBe(true);
-  });
+describe("effectiveEffect", () => {
+  function effectConfig(experimental: boolean | undefined, enabled: boolean): EffectGateConfig {
+    return {
+      general: { experimental_enabled: experimental, effects_enabled: true },
+      tts: {
+        active_profile_id: "p1",
+        profiles: [{ id: "p1", effects: { enabled, active_effect: "walkie_talkie" } }]
+      }
+    };
+  }
 
-  test("returns false when experimental is off even if hud is enabled", () => {
-    expect(
-      isHudEffective({
-        general: { experimental_enabled: false },
-        hud: { enabled: true }
-      })
-    ).toBe(false);
-  });
+  test("gates profile effects behind global switches, experimental flag, and active profile", () => {
+    expect(effectiveEffect(effectConfig(true, true))).toBe("walkie_talkie");
+    expect(effectiveEffect(effectConfig(false, true))).toBe("none");
+    expect(effectiveEffect(effectConfig(undefined, true))).toBe("none");
+    expect(effectiveEffect(effectConfig(true, false))).toBe("none");
 
-  test("returns false when hud is off", () => {
-    expect(
-      isHudEffective({
-        general: { experimental_enabled: true },
-        hud: { enabled: false }
-      })
-    ).toBe(false);
-  });
+    const globalOff = effectConfig(true, true);
+    globalOff.general.effects_enabled = false;
+    expect(effectiveEffect(globalOff)).toBe("none");
 
-  test("handles null or undefined config safely", () => {
-    expect(isHudEffective(null)).toBe(false);
-    expect(isHudEffective(undefined)).toBe(false);
+    const missingProfile = effectConfig(true, true);
+    missingProfile.tts.active_profile_id = "gone";
+    expect(effectiveEffect(missingProfile)).toBe("none");
   });
 });

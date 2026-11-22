@@ -413,15 +413,12 @@ mod tests {
     }
 
     #[test]
-    fn clamp_leaves_honest_files_unchanged() {
+    fn clamp_leaves_honest_files_and_non_wav_bytes_unchanged() {
         let mut wav = canonical_wav(&vec![0x11; 800]);
         let before = wav.clone();
         clamp_chunk_sizes_to_file(&mut wav);
         assert_eq!(wav, before);
-    }
 
-    #[test]
-    fn clamp_ignores_non_wav_bytes() {
         let mut garbage = vec![1u8, 2, 3];
         clamp_chunk_sizes_to_file(&mut garbage);
         assert_eq!(garbage, vec![1u8, 2, 3]);

@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 it("keeps one listener per event when HMR stops and restarts it mid-start", async () => {
-  Object.assign(window, { __TAURI_INTERNALS__: {} });
+  vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
 
   // HMR destroys the layout while its start awaits `listen`, then mounts a new one.
   const first = startHistoryEventListeners();

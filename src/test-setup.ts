@@ -1,5 +1,8 @@
 import { vi } from "vite-plus/test";
-import "#lib/i18n";
+
+if (globalThis.document !== undefined) {
+  await import("#lib/i18n");
+}
 
 // Create a global mock for $app/state before any imports
 let mockPathname = "/";

@@ -824,21 +824,15 @@ mod tests {
         let eff_active = resolve_effective(&tts);
         assert_eq!(eff_active.engine, TtsEngine::Piper);
         assert_eq!(active_engine(&tts), TtsEngine::Piper);
-    }
 
-    #[test]
-    fn voice_display_name_uses_resolved_profile_engine() {
-        let tts = TtsConfig::default();
-        let name = voice_display_name(
-            &TtsEngine::Piper,
-            &tts,
-            "en_US-lessac-medium",
-            Some("Lessac"),
+        assert_eq!(
+            voice_display_name(&TtsEngine::Piper, &tts, "en_US-lessac-medium", Some("Lessac")),
+            "lessac"
         );
-        assert_eq!(name, "lessac");
-
-        let name_no_label = voice_display_name(&TtsEngine::OpenAI, &tts, "Alloy", None);
-        assert_eq!(name_no_label, "alloy");
+        assert_eq!(
+            voice_display_name(&TtsEngine::OpenAI, &tts, "Alloy", None),
+            "alloy"
+        );
     }
 
     #[test]

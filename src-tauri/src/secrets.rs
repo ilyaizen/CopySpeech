@@ -140,56 +140,28 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_env_wins_over_legacy() {
-        let adjacent = temp_dir("adjacent-wins-adj");
-        let legacy = temp_dir("adjacent-wins-legacy");
-        std::fs::write(adjacent.join(".env"), "KEY=dummy-adjacent\n").unwrap();
+    fn dotenv_path_precedence_and_fallbacks() {
+        let adjacent = temp_dir("prec-adj");
+        let legacy = temp_dir("prec-legacy");
+
+        assert_eq!(select_dotenv_path(Some(&adjacent), Some(&legacy)), None);
+        assert_eq!(select_dotenv_path(None, None), None);
+
         std::fs::write(legacy.join(".env"), "KEY=dummy-legacy\n").unwrap();
-
-        assert_eq!(
-            select_dotenv_path(Some(&adjacent), Some(&legacy)),
-            Some(adjacent.join(".env"))
-        );
-
-        let _ = std::fs::remove_dir_all(&adjacent);
-        let _ = std::fs::remove_dir_all(&legacy);
-    }
-
-    #[test]
-    fn legacy_env_used_when_adjacent_missing() {
-        let adjacent = temp_dir("legacy-fallback-adj");
-        let legacy = temp_dir("legacy-fallback-legacy");
-        std::fs::write(legacy.join(".env"), "KEY=dummy-legacy\n").unwrap();
-
         assert_eq!(
             select_dotenv_path(Some(&adjacent), Some(&legacy)),
             Some(legacy.join(".env"))
         );
-
-        let _ = std::fs::remove_dir_all(&adjacent);
-        let _ = std::fs::remove_dir_all(&legacy);
-    }
-
-    #[test]
-    fn legacy_used_when_exe_dir_unknown() {
-        let legacy = temp_dir("legacy-no-exe-dir");
-        std::fs::write(legacy.join(".env"), "KEY=dummy-legacy\n").unwrap();
-
         assert_eq!(
             select_dotenv_path(None, Some(&legacy)),
             Some(legacy.join(".env"))
         );
 
-        let _ = std::fs::remove_dir_all(&legacy);
-    }
-
-    #[test]
-    fn none_when_neither_exists() {
-        let adjacent = temp_dir("none-adj");
-        let legacy = temp_dir("none-legacy");
-
-        assert_eq!(select_dotenv_path(Some(&adjacent), Some(&legacy)), None);
-        assert_eq!(select_dotenv_path(None, None), None);
+        std::fs::write(adjacent.join(".env"), "KEY=dummy-adjacent\n").unwrap();
+        assert_eq!(
+            select_dotenv_path(Some(&adjacent), Some(&legacy)),
+            Some(adjacent.join(".env"))
+        );
 
         let _ = std::fs::remove_dir_all(&adjacent);
         let _ = std::fs::remove_dir_all(&legacy);
@@ -213,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_skips_blank_and_comments_and_trims() {
+    fn parse_dotenv_trims_skips_comments_accepts_bom_and_reports_malformed_lines() {
         let (pairs, malformed) =
             parse_dotenv("# comment\n\n  KEY_A = dummy-a  \nKEY_B=dummy-b\n=orphan\n");
         assert_eq!(
@@ -224,20 +196,14 @@ mod tests {
             ]
         );
         assert!(malformed.is_empty());
-    }
 
-    #[test]
-    fn parse_accepts_utf8_bom() {
-        let (pairs, malformed) = parse_dotenv("\u{feff}KEY=dummy\n");
-        assert_eq!(pairs, vec![("KEY".to_string(), "dummy".to_string())]);
-        assert!(malformed.is_empty());
-    }
+        let (bom_pairs, bom_malformed) = parse_dotenv("\u{feff}KEY=dummy\n");
+        assert_eq!(bom_pairs, vec![("KEY".to_string(), "dummy".to_string())]);
+        assert!(bom_malformed.is_empty());
 
-    #[test]
-    fn parse_reports_malformed_by_line_number_only() {
-        let (pairs, malformed) =
+        let (mixed_pairs, mixed_malformed) =
             parse_dotenv("KEY_A=dummy-a\ndummy-secret-no-equals\nKEY_B=dummy-b\n");
-        assert_eq!(pairs.len(), 2);
-        assert_eq!(malformed, vec![2]);
+        assert_eq!(mixed_pairs.len(), 2);
+        assert_eq!(mixed_malformed, vec![2]);
     }
 }

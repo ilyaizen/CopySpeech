@@ -84,21 +84,21 @@ pub fn sanitize_text_tag_safe(text: &str, config: &SanitizationConfig) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SanitizationConfig;
 
     fn default_config() -> SanitizationConfig {
         SanitizationConfig::default()
     }
 
-    /// The post-process output path: bracket emote tags survive the
-    /// re-sanitize even though the plain citation pass would eat them.
     #[test]
-    fn tag_safe_resanitize_keeps_emote_tags() {
-        let out = sanitize_text_tag_safe(
-            "[sighs] Well [clears throat] fine [appalled]!",
-            &default_config(),
+    fn tag_safe_resanitize_keeps_emote_tags_and_cleans_text() {
+        assert_eq!(
+            sanitize_text_tag_safe("[sighs] Well [clears throat] fine [appalled]!", &default_config()),
+            "[sighs] Well [clears throat] fine [appalled]!"
         );
-        assert_eq!(out, "[sighs] Well [clears throat] fine [appalled]!");
+        let out = sanitize_text_tag_safe("[happy]  See   **bold** text", &default_config());
+        assert!(!out.contains("  "), "{out:?}");
+        assert!(out.contains("[happy]"), "{out:?}");
+        assert!(out.contains("See **bold** text"), "{out:?}");
     }
 
     /// The pre-LLM path is unchanged: citations and markdown links are
@@ -120,17 +120,5 @@ mod tests {
 
         config.markdown.strip_bold_italic = true;
         assert_eq!(sanitize_text(input, &config), "emphasis and strong text");
-    }
-
-    /// Tag safety only exempts the brackets; everything else in the tagged
-    /// text still runs through the full pipeline.
-    #[test]
-    fn tag_safe_resanitize_still_cleans_surrounding_text() {
-        let out = sanitize_text_tag_safe("[happy]  See   **bold** text", &default_config());
-        // Bold/italic markers survive by default (strip_bold_italic=false);
-        // the surrounding whitespace cleanup still applies.
-        assert!(!out.contains("  "), "{out:?}");
-        assert!(out.contains("[happy]"), "{out:?}");
-        assert!(out.contains("See **bold** text"), "{out:?}");
     }
 }

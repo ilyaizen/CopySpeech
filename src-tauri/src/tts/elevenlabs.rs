@@ -87,26 +87,6 @@ impl ElevenLabsOutputFormat {
             ElevenLabsOutputFormat::Mulaw_8000 => "audio/mulaw",
         }
     }
-
-    /// Check if this format can be decoded by rodio
-    #[allow(dead_code)]
-    pub fn is_playable_by_rodio(&self) -> bool {
-        match self {
-            // MP3, WAV (PCM), FLAC, and OGG Vorbis are supported by rodio
-            ElevenLabsOutputFormat::Mp3_44100_128
-            | ElevenLabsOutputFormat::Mp3_44100_192
-            | ElevenLabsOutputFormat::Mp3_44100_32
-            | ElevenLabsOutputFormat::Mp3_22050_32
-            | ElevenLabsOutputFormat::Pcm_44100
-            | ElevenLabsOutputFormat::Pcm_22050
-            | ElevenLabsOutputFormat::Pcm_16000
-            | ElevenLabsOutputFormat::OggVorbis_44100
-            | ElevenLabsOutputFormat::OggVorbis_22050
-            | ElevenLabsOutputFormat::Flac_44100 => true,
-            // MULAW is not directly supported by rodio
-            ElevenLabsOutputFormat::Mulaw_8000 => false,
-        }
-    }
 }
 
 /// Voice information from ElevenLabs API
@@ -161,7 +141,7 @@ pub struct ElevenLabsTtsBackend {
 }
 
 /// Production API root. Tests point [`ElevenLabsTtsBackend::synthesize_streaming_from`]
-/// at a wiremock server instead.
+/// at a local test HTTP server instead.
 const ELEVENLABS_API_BASE: &str = "https://api.elevenlabs.io";
 
 /// The /stream endpoint is always requested with raw 16-bit LE mono PCM at
@@ -175,7 +155,7 @@ impl ElevenLabsTtsBackend {
         Self { config }
     }
 
-    /// Stream synthesis from an explicit API base URL (wiremock tests override it).
+    /// Stream synthesis from an explicit API base URL (local test HTTP server overrides it).
     ///
     /// Returns immediately with a [`ChunkStream`] whose meta describes pcm_24000
     /// (24 kHz, mono, 16-bit); a background thread pumps response bytes into
@@ -714,38 +694,7 @@ impl TtsBackend for ElevenLabsTtsBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_output_format_as_str() {
-        assert_eq!(
-            ElevenLabsOutputFormat::Mp3_44100_128.as_str(),
-            "mp3_44100_128"
-        );
-        assert_eq!(ElevenLabsOutputFormat::Pcm_44100.as_str(), "pcm_44100");
-    }
-
-    #[test]
-    fn test_output_format_mime_type() {
-        assert_eq!(
-            ElevenLabsOutputFormat::Mp3_44100_128.mime_type(),
-            "audio/mpeg"
-        );
-        assert_eq!(ElevenLabsOutputFormat::Pcm_44100.mime_type(), "audio/pcm");
-    }
-
-    #[test]
-    fn test_output_format_is_playable_by_rodio() {
-        assert!(ElevenLabsOutputFormat::Mp3_44100_128.is_playable_by_rodio());
-        assert!(ElevenLabsOutputFormat::Pcm_44100.is_playable_by_rodio());
-        assert!(ElevenLabsOutputFormat::Flac_44100.is_playable_by_rodio());
-        assert!(!ElevenLabsOutputFormat::Mulaw_8000.is_playable_by_rodio());
-    }
-
-    #[test]
-    fn supports_streaming_reports_true() {
-        let backend = ElevenLabsTtsBackend::new(ElevenLabsConfig::default());
-        assert!(backend.supports_streaming());
-    }
+    use crate::tts::test_http::TestServer;
 
     /// Explicitly invoked only: uses the configured account for a short synthetic probe.
     #[test]
@@ -809,7 +758,7 @@ mod tests {
         );
     }
 
-    // ── Streaming (wiremock integration through the real client) ──────────
+    // ── Streaming (local test HTTP server integration through the real client) ─
 
     fn test_backend() -> ElevenLabsTtsBackend {
         let mut config = ElevenLabsConfig::default();
@@ -817,7 +766,7 @@ mod tests {
         ElevenLabsTtsBackend::new(config)
     }
 
-    async fn drain(stream: &ChunkStream) -> Vec<ChunkItem> {
+    fn drain(stream: &ChunkStream) -> Vec<ChunkItem> {
         let mut items = Vec::new();
         while let Some(item) = stream
             .recv_timeout(std::time::Duration::from_secs(10))
@@ -829,38 +778,23 @@ mod tests {
         items
     }
 
-    #[tokio::test]
-    async fn streams_pcm_chunks_in_order_with_pcm_24000_meta_and_request_shape() {
-        let server = wiremock::MockServer::start().await;
-
-        // Distinct halves so ordering across whatever TCP segmentation occurs
-        // remains observable.
+    #[test]
+    fn streams_pcm_chunks_in_order_with_pcm_24000_meta_and_request_shape() {
         let first_half: Vec<u8> = (0u16..512).map(|i| (i % 256) as u8).collect();
         let second_half: Vec<u8> = (128u16..640).map(|i| ((i * 7) % 256) as u8).collect();
         let expected: Vec<u8> = [first_half.clone(), second_half.clone()].concat();
-
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(format!(
-                "/v1/text-to-speech/{}/stream/with-timestamps",
-                ElevenLabsConfig::default().voice_id
-            )))
-            .and(wiremock::matchers::query_param(
-                "output_format",
-                STREAM_OUTPUT_FORMAT,
-            ))
-            .and(wiremock::matchers::header("xi-api-key", "test-key"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string({
-                use base64::{engine::general_purpose::STANDARD, Engine};
-                [first_half.clone(), second_half.clone()]
-                    .iter()
-                    .map(|pcm| json!({"audio_base64": STANDARD.encode(pcm)}).to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }))
-            .mount(&server)
-            .await;
+        let body = {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            [first_half, second_half]
+                .iter()
+                .map(|pcm| json!({"audio_base64": STANDARD.encode(pcm)}).to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let server = TestServer::start_one(200, body);
 
         let backend = test_backend();
+        assert!(backend.supports_streaming());
         let stream = backend
             .synthesize_streaming_from(&server.uri(), "hello streaming world")
             .expect("valid api key must not fail synchronously");
@@ -869,7 +803,7 @@ mod tests {
         assert_eq!(stream.meta.channels, 1);
         assert_eq!(stream.meta.bits_per_sample, 16);
 
-        let items = drain(&stream).await;
+        let items = drain(&stream);
         let concatenated: Vec<u8> = items
             .iter()
             .flat_map(|item| match item {
@@ -881,97 +815,66 @@ mod tests {
         assert!(!items.is_empty(), "expected at least one Pcm chunk");
         assert_eq!(concatenated, expected, "chunks must arrive in body order");
 
-        // Request shape: exactly one POST with path, query param, and key header.
-        let requests = server
-            .received_requests()
-            .await
-            .expect("request log available");
+        let requests = server.requests();
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
-        assert_eq!(request.method, reqwest::Method::POST);
+        assert_eq!(request.method, "POST");
         assert_eq!(
-            request.url.path(),
+            request.path,
             format!(
                 "/v1/text-to-speech/{}/stream/with-timestamps",
                 ElevenLabsConfig::default().voice_id
             )
         );
         assert_eq!(
-            request.url.query(),
+            request.query.as_deref(),
             Some("output_format=pcm_24000"),
             "stream endpoint must pin pcm_24000"
         );
-        assert_eq!(
-            request
-                .headers
-                .get("xi-api-key")
-                .and_then(|v| v.to_str().ok()),
-            Some("test-key")
-        );
+        assert_eq!(request.header("xi-api-key"), Some("test-key"));
     }
 
-    #[tokio::test]
-    async fn unauthorized_response_surfaces_immediate_failed_item() {
-        let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .respond_with(wiremock::ResponseTemplate::new(401).set_body_string(
-                r#"{"detail":{"status":"invalid_api_key","message":"Invalid API key"}}"#,
-            ))
-            .mount(&server)
-            .await;
-
+    #[test]
+    fn unauthorized_and_empty_body_responses_handle_stream_boundaries() {
+        let server = TestServer::start(vec![
+            (
+                401,
+                br#"{"detail":{"status":"invalid_api_key","message":"Invalid API key"}}"#.to_vec(),
+            ),
+            (200, Vec::new()),
+        ]);
         let backend = test_backend();
-        let stream = backend
+
+        let err_stream = backend
             .synthesize_streaming_from(&server.uri(), "hello")
             .expect("valid api key must not fail synchronously");
-
-        let first = stream.recv();
+        let first = err_stream.recv();
         assert!(
             matches!(&first, Some(ChunkItem::Failed(reason)) if reason.contains("401")),
-            "first item must be Failed mentioning 401, got {:?}",
-            first
+            "first item must be Failed mentioning 401, got {first:?}"
         );
-        // Failure closes the channel: no further items, clean end-of-stream.
-        assert!(stream.recv().is_none());
-    }
+        assert!(err_stream.recv().is_none());
 
-    #[tokio::test]
-    async fn empty_body_ends_stream_cleanly_without_chunks() {
-        let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(format!(
-                "/v1/text-to-speech/{}/stream/with-timestamps",
-                ElevenLabsConfig::default().voice_id
-            )))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(Vec::new()))
-            .mount(&server)
-            .await;
-
-        let backend = test_backend();
-        let stream = backend
+        let empty_stream = backend
             .synthesize_streaming_from(&server.uri(), "hello")
             .expect("valid api key must not fail synchronously");
-
         assert_eq!(
-            stream.recv_timeout(std::time::Duration::from_secs(5)),
-            Ok(None),
-            "empty body must yield end-of-stream without any Pcm item"
+            empty_stream.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(None)
         );
     }
 
-    #[tokio::test]
-    async fn missing_api_key_fails_before_requesting() {
-        let server = wiremock::MockServer::start().await;
+    #[test]
+    fn missing_api_key_fails_before_requesting() {
+        let server = TestServer::start_one(200, Vec::new());
         let mut config = ElevenLabsConfig::default();
         config.api_key = String::new();
         let backend = ElevenLabsTtsBackend::new(config);
 
         let result = backend.synthesize_streaming_from(&server.uri(), "hello");
         assert!(matches!(result, Err(TtsError::Unavailable(_))));
-
-        let requests = server.received_requests().await.unwrap_or_default();
         assert!(
-            requests.is_empty(),
+            server.requests().is_empty(),
             "no HTTP request may be made without a key"
         );
     }

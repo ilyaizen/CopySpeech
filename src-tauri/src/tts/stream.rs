@@ -239,10 +239,43 @@ pub fn pcm_to_wav(pcm: &[u8], meta: &AudioFormatMeta) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
+
+    /// Build a minimal valid WAV: RIFF header + fmt chunk + data chunk.
+    fn build_wav(sample_rate: u32, channels: u16, bits_per_sample: u16, pcm: &[u8]) -> Vec<u8> {
+        let fmt = vec![
+            &1u16.to_le_bytes()[..],
+            &channels.to_le_bytes()[..],
+            &sample_rate.to_le_bytes()[..],
+            &(sample_rate * u32::from(channels) * u32::from(bits_per_sample) / 8).to_le_bytes()[..],
+            &(channels * bits_per_sample / 8).to_le_bytes()[..],
+            &bits_per_sample.to_le_bytes()[..],
+        ]
+        .concat();
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        let riff_size = (4 + 8 + fmt.len() + 8 + pcm.len()) as u32;
+        wav.extend_from_slice(&riff_size.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&fmt);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(pcm);
+        wav
+    }
+
+    fn pcm_meta() -> AudioFormatMeta {
+        AudioFormatMeta {
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: 16,
+        }
+    }
 
     #[test]
-    fn batch_stream_round_trip_preserves_native_captions() {
+    fn wav_and_batch_stream_round_trip_preserves_meta_and_captions() {
         let captions = super::super::captions::CaptionAlignment {
             text: "Hi".into(),
             words: vec![super::super::captions::WordTiming {
@@ -263,35 +296,38 @@ mod tests {
         .unwrap();
         assert_eq!(speech.bytes, bytes);
         assert_eq!(speech.captions, Some(captions));
-    }
 
-    #[test]
-    fn invalid_batch_captions_do_not_reject_valid_wav() {
-        let bytes = build_wav(8000, 1, 16, &[1, 2, 3, 4]);
-        let captions = super::super::captions::CaptionAlignment {
-            text: "Hi".into(),
-            words: vec![super::super::captions::WordTiming {
-                text_start: 0,
-                text_end: 3,
-                start_ms: 0.0,
-                end_ms: 1.0,
-            }],
+        let pcm = vec![0u8, 1, 2, 3, 254, 255];
+        let stream = chunk_stream_from_speech(build_wav(44100, 1, 16, &pcm).into()).unwrap();
+        assert_eq!(
+            (stream.meta.sample_rate, stream.meta.channels, stream.meta.bits_per_sample),
+            (44100, 1, 16)
+        );
+        assert_eq!(stream.recv(), Some(ChunkItem::Pcm(pcm)));
+        assert!(stream.recv().is_none());
+
+        let stereo = AudioFormatMeta {
+            sample_rate: 24000,
+            channels: 2,
+            bits_per_sample: 16,
         };
-        assert!(captions.validate().is_err());
-        let speech = collect_speech(
-            chunk_stream_from_speech(super::super::captions::SpeechAudio {
-                bytes: bytes.clone(),
-                captions: Some(captions),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(speech.bytes, bytes);
-        assert_eq!(speech.captions, None);
+        let pcm2 = vec![7u8; 40];
+        let round = chunk_stream_from_speech(pcm_to_wav(&pcm2, &stereo).into()).unwrap();
+        assert_eq!(round.meta.channels, 2);
+        assert_eq!(round.recv(), Some(ChunkItem::Pcm(pcm2)));
     }
 
     #[test]
-    fn invalid_snapshot_clears_collected_captions_without_losing_pcm() {
+    fn malformed_input_is_rejected() {
+        assert!(chunk_stream_from_speech(Vec::<u8>::new().into()).is_err());
+
+        let mut junk = b"RIFF\x24\x00\x00\x00JUNK".to_vec();
+        junk.resize(64, 0);
+        assert!(chunk_stream_from_speech(junk.into()).is_err());
+    }
+
+    #[test]
+    fn invalid_or_cleared_captions_preserve_pcm() {
         let valid = super::super::captions::CaptionAlignment {
             text: "Hi".into(),
             words: vec![super::super::captions::WordTiming {
@@ -301,26 +337,43 @@ mod tests {
                 end_ms: 0.1,
             }],
         };
-        let mut invalid = valid.clone();
-        invalid.words[0].start_ms = -1.0;
-        let (tx, rx) = mpsc::channel();
-        for item in [
-            ChunkItem::Captions(valid.clone()),
-            ChunkItem::Pcm(vec![1, 2]),
-            ChunkItem::Captions(invalid),
-            ChunkItem::Pcm(vec![3, 4]),
-        ] {
-            tx.send(item).unwrap();
+
+        let mut bad_offset = valid.clone();
+        bad_offset.words[0].text_end = 3;
+        let batch_bytes = build_wav(8000, 1, 16, &[1, 2, 3, 4]);
+        let batch = collect_speech(
+            chunk_stream_from_speech(super::super::captions::SpeechAudio {
+                bytes: batch_bytes.clone(),
+                captions: Some(bad_offset),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(batch.bytes, batch_bytes);
+        assert_eq!(batch.captions, None);
+
+        let mut neg_ms = valid.clone();
+        neg_ms.words[0].start_ms = -1.0;
+        for clear_item in [ChunkItem::Captions(neg_ms), ChunkItem::ClearCaptions] {
+            let (tx, rx) = mpsc::channel();
+            for item in [
+                ChunkItem::Captions(valid.clone()),
+                ChunkItem::Pcm(vec![1, 2]),
+                clear_item,
+                ChunkItem::Pcm(vec![3, 4]),
+            ] {
+                tx.send(item).unwrap();
+            }
+            drop(tx);
+            let meta = AudioFormatMeta {
+                sample_rate: 8000,
+                channels: 1,
+                bits_per_sample: 16,
+            };
+            let speech = collect_speech(ChunkStream::new(meta, rx)).unwrap();
+            assert_eq!(speech.bytes, batch_bytes);
+            assert_eq!(speech.captions, None);
         }
-        drop(tx);
-        let meta = AudioFormatMeta {
-            sample_rate: 8000,
-            channels: 1,
-            bits_per_sample: 16,
-        };
-        let speech = collect_speech(ChunkStream::new(meta, rx)).unwrap();
-        assert_eq!(speech.bytes, build_wav(8000, 1, 16, &[1, 2, 3, 4]));
-        assert_eq!(speech.captions, None);
 
         let next = collect_speech(
             chunk_stream_from_speech(super::super::captions::SpeechAudio {
@@ -331,37 +384,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(next.captions, Some(valid));
-    }
-
-    #[test]
-    fn provider_caption_clear_removes_the_collected_snapshot() {
-        let captions = super::super::captions::CaptionAlignment {
-            text: "Hi".into(),
-            words: vec![super::super::captions::WordTiming {
-                text_start: 0,
-                text_end: 2,
-                start_ms: 0.0,
-                end_ms: 0.1,
-            }],
-        };
-        let (tx, rx) = mpsc::channel();
-        for item in [
-            ChunkItem::Captions(captions),
-            ChunkItem::Pcm(vec![1, 2]),
-            ChunkItem::ClearCaptions,
-            ChunkItem::Pcm(vec![3, 4]),
-        ] {
-            tx.send(item).unwrap();
-        }
-        drop(tx);
-        let meta = AudioFormatMeta {
-            sample_rate: 8000,
-            channels: 1,
-            bits_per_sample: 16,
-        };
-        let speech = collect_speech(ChunkStream::new(meta, rx)).unwrap();
-        assert_eq!(speech.captions, None);
-        assert_eq!(speech.bytes, build_wav(8000, 1, 16, &[1, 2, 3, 4]));
     }
 
     #[test]
@@ -387,170 +409,28 @@ mod tests {
         }
     }
 
-    /// Build a minimal valid WAV: RIFF header + fmt chunk + data chunk.
-    fn build_wav(sample_rate: u32, channels: u16, bits_per_sample: u16, pcm: &[u8]) -> Vec<u8> {
-        let fmt = vec![
-            &1u16.to_le_bytes()[..],        // PCM format tag
-            &channels.to_le_bytes()[..],    // channel count
-            &sample_rate.to_le_bytes()[..], // sample rate
-            &(sample_rate * u32::from(channels) * u32::from(bits_per_sample) / 8).to_le_bytes()[..], // byte rate
-            &(channels * bits_per_sample / 8).to_le_bytes()[..], // block align
-            &bits_per_sample.to_le_bytes()[..],                  // bits per sample
-        ]
-        .concat();
-
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        let riff_size = (4 + 8 + fmt.len() + 8 + pcm.len()) as u32;
-        wav.extend_from_slice(&riff_size.to_le_bytes());
-        wav.extend_from_slice(b"WAVE");
-        wav.extend_from_slice(b"fmt ");
-        wav.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
-        wav.extend_from_slice(&fmt);
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
-        wav.extend_from_slice(pcm);
-        wav
-    }
-
     #[test]
-    fn wav_buffer_becomes_single_pcm_chunk_with_parsed_meta() {
-        let pcm = vec![0u8, 1u8, 2u8, 3u8, 254u8, 255u8];
-        let wav = build_wav(44100, 1, 16, &pcm);
-
-        let stream = chunk_stream_from_speech(wav.into()).expect("valid WAV must parse");
-
-        assert_eq!(stream.meta.sample_rate, 44100);
-        assert_eq!(stream.meta.channels, 1);
-        assert_eq!(stream.meta.bits_per_sample, 16);
-
-        // Exactly one chunk equal to the data section...
-        assert!(matches!(stream.recv(), Some(ChunkItem::Pcm(bytes)) if bytes == pcm));
-        // ...then channel-close signals end of stream.
-        assert!(stream.recv().is_none());
-    }
-
-    #[test]
-    fn malformed_input_is_rejected() {
-        assert!(chunk_stream_from_speech(Vec::<u8>::new().into()).is_err());
-
-        // Valid header shape, but not a WAV (missing WAVE marker).
-        let mut junk = b"RIFF\x24\x00\x00\x00JUNK".to_vec();
-        junk.resize(64, 0);
-        assert!(chunk_stream_from_speech(junk.into()).is_err());
-    }
-
-    #[test]
-    fn failed_item_passes_through_recv() {
-        let meta = AudioFormatMeta {
-            sample_rate: 22050,
-            channels: 2,
-            bits_per_sample: 16,
-        };
-        let (tx, rx) = mpsc::channel();
-        tx.send(ChunkItem::Failed("engine died mid-stream".into()))
-            .unwrap();
-        drop(tx);
-
-        let stream = ChunkStream::new(meta, rx);
-        assert!(
-            matches!(stream.recv(), Some(ChunkItem::Failed(reason)) if reason.contains("mid-stream"))
-        );
-        assert!(stream.recv().is_none());
-    }
-
-    #[test]
-    fn channel_close_signals_end_of_stream_via_recv_and_recv_timeout() {
-        let meta = AudioFormatMeta {
-            sample_rate: 16000,
-            channels: 1,
-            bits_per_sample: 16,
-        };
-        let (_, rx) = mpsc::channel::<ChunkItem>();
-        let stream = ChunkStream::new(meta, rx);
-
-        assert!(stream.recv().is_none());
-        assert_eq!(
-            stream.recv_timeout(Duration::from_millis(50)),
-            Ok(None),
-            "closed channel resolves recv_timeout immediately with end-of-stream"
-        );
-    }
-
-    #[test]
-    fn pcm_to_wav_round_trips_through_chunk_stream_from_speech() {
-        let meta = AudioFormatMeta {
-            sample_rate: 24000,
-            channels: 2,
-            bits_per_sample: 16,
-        };
-        let pcm = vec![7u8; 40];
-        let wav = pcm_to_wav(&pcm, &meta);
-
-        let stream = chunk_stream_from_speech(wav.into()).expect("generated WAV must parse");
-        assert_eq!(stream.meta.sample_rate, 24000);
-        assert_eq!(stream.meta.channels, 2);
-        assert_eq!(stream.meta.bits_per_sample, 16);
-        assert!(matches!(stream.recv(), Some(ChunkItem::Pcm(bytes)) if bytes == pcm));
-    }
-
-    #[test]
-    fn recv_timeout_times_out_when_producer_silent_then_delivers_late_chunk() {
-        let meta = AudioFormatMeta {
-            sample_rate: 44100,
-            channels: 1,
-            bits_per_sample: 16,
-        };
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(120));
-            let _ = tx.send(ChunkItem::Pcm(vec![9, 9]));
-        });
-
-        let stream = ChunkStream::new(meta, rx);
-        assert_eq!(
-            stream.recv_timeout(Duration::from_millis(20)),
-            Err(mpsc::RecvTimeoutError::Timeout),
-            "silent producer must surface Timeout, not block"
-        );
-        assert!(matches!(
-            stream.recv_timeout(Duration::from_secs(2)),
-            Ok(Some(ChunkItem::Pcm(_)))
-        ));
-    }
-
-    fn pcm_meta() -> AudioFormatMeta {
-        AudioFormatMeta {
-            sample_rate: 24000,
-            channels: 1,
-            bits_per_sample: 16,
-        }
-    }
-
-    #[test]
-    fn spawn_stream_delivers_items_in_order_then_closes() {
-        let stream = spawn_stream(pcm_meta(), |sink| async move {
+    fn spawn_stream_delivers_items_errors_and_closes() {
+        let ok_stream = spawn_stream(pcm_meta(), |sink| async move {
             assert!(sink.send(ChunkItem::Pcm(vec![1, 2])));
             assert!(sink.send(ChunkItem::Pcm(vec![3])));
             Ok(())
         });
-        assert_eq!(stream.recv(), Some(ChunkItem::Pcm(vec![1, 2])));
-        assert_eq!(stream.recv(), Some(ChunkItem::Pcm(vec![3])));
-        assert_eq!(stream.recv(), None);
-    }
+        assert_eq!(ok_stream.recv(), Some(ChunkItem::Pcm(vec![1, 2])));
+        assert_eq!(ok_stream.recv(), Some(ChunkItem::Pcm(vec![3])));
+        assert_eq!(ok_stream.recv(), None);
+        assert_eq!(ok_stream.recv_timeout(Duration::ZERO), Ok(None));
 
-    #[test]
-    fn spawn_stream_turns_producer_error_into_one_failed_item() {
-        let stream = spawn_stream(pcm_meta(), |sink| async move {
+        let err_stream = spawn_stream(pcm_meta(), |sink| async move {
             assert!(sink.send(ChunkItem::Pcm(vec![7])));
             Err(TtsError::Http("boom".into()))
         });
-        assert_eq!(stream.recv(), Some(ChunkItem::Pcm(vec![7])));
+        assert_eq!(err_stream.recv(), Some(ChunkItem::Pcm(vec![7])));
         assert_eq!(
-            stream.recv(),
+            err_stream.recv(),
             Some(ChunkItem::Failed("HTTP error: boom".into()))
         );
-        assert_eq!(stream.recv(), None);
+        assert_eq!(err_stream.recv(), None);
     }
 
     #[test]

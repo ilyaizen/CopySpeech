@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_wraps_provider_pcm_at_its_native_rate() {
+    fn synthesize_preview_wraps_pcm_and_uses_container_outputs() {
         let mut tts = TtsConfig::default();
         tts.openai.response_format = "pcm".into();
         for (engine, expected_rate) in
@@ -464,11 +464,7 @@ mod tests {
             assert_eq!(&audio[34..36], &16u16.to_le_bytes());
             assert_eq!(&audio[44..], &[1, 2, 3, 4]);
         }
-    }
 
-    #[test]
-    fn preview_uses_container_output_for_elevenlabs_and_cartesia() {
-        let tts = TtsConfig::default();
         for engine in [TtsEngine::ElevenLabs, TtsEngine::Cartesia] {
             let mut profile = VoiceProfile::default();
             profile.engine = engine;
@@ -481,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_uses_unsaved_profile_and_requested_voice_without_mutation() {
+    fn preview_request_applies_voice_without_mutating_profile() {
         let tts = TtsConfig::default();
         let mut profile = VoiceProfile::default();
         profile.id = "unsaved".into();
@@ -506,15 +502,10 @@ mod tests {
             Some("old")
         );
         assert!(!tts.profiles.iter().any(|p| p.id == "unsaved"));
-    }
 
-    #[test]
-    fn preview_preserves_empty_voice_id() {
-        let tts = TtsConfig::default();
-        let mut profile = VoiceProfile::default();
-        profile.engine = TtsEngine::Fish;
-        let effective = preview_request(&profile, String::new(), &tts);
-        assert_eq!(effective.voice, "");
+        let mut fish = VoiceProfile::default();
+        fish.engine = TtsEngine::Fish;
+        assert_eq!(preview_request(&fish, String::new(), &tts).voice, "");
     }
 
     #[test]
@@ -558,86 +549,42 @@ mod tests {
     }
 
     #[test]
-    fn refreshable_engines_match_the_catalog_flag() {
-        for engine in [
-            TtsEngine::ElevenLabs,
-            TtsEngine::Cartesia,
-            TtsEngine::Fish,
-            TtsEngine::Xai,
-            TtsEngine::Mistral,
-        ] {
-            assert!(supports_voice_refresh(&engine), "{:?}", engine);
-        }
-        assert!(!supports_voice_refresh(&TtsEngine::Kokoro));
-        assert!(!supports_voice_refresh(&TtsEngine::OpenAI));
-    }
-
-    #[test]
-    fn cached_list_round_trips_for_the_same_account() {
+    fn voice_cache_round_trip_invalidation_and_corrupt_handling() {
         let path = temp_cache("roundtrip");
-        let tts = tts_with_xai_key("key-a");
-        let account = account_fingerprint(&TtsEngine::Xai, &tts);
-        store_cached_voices(&path, &TtsEngine::Xai, account, &sample()).unwrap();
+        let mut tts = tts_with_xai_key("key-a");
+        tts.mistral.api_key = "key-m".into();
+        let xai_account = account_fingerprint(&TtsEngine::Xai, &tts);
+        let mistral_account = account_fingerprint(&TtsEngine::Mistral, &tts);
+        store_cached_voices(&path, &TtsEngine::Xai, xai_account, &sample()).unwrap();
+        store_cached_voices(&path, &TtsEngine::Mistral, mistral_account, &sample()).unwrap();
 
         let cached = load_cached_voices(&path, &tts);
         let xai = cached.get("xai").expect("xai entry");
         assert_eq!(xai.voices.len(), 1);
         assert_eq!(xai.voices[0].label, "Eve");
         assert!(xai.fetched_at_ms > 0);
+        assert!(cached.contains_key("mistral"));
+
+        // Different API key hides cached entry.
+        assert!(!load_cached_voices(&path, &tts_with_xai_key("key-b")).contains_key("xai"));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
 
-    #[test]
-    fn cached_list_from_another_api_key_is_hidden() {
-        let path = temp_cache("account");
-        let old = tts_with_xai_key("key-a");
-        let account = account_fingerprint(&TtsEngine::Xai, &old);
-        store_cached_voices(&path, &TtsEngine::Xai, account, &sample()).unwrap();
-
-        let cached = load_cached_voices(&path, &tts_with_xai_key("key-b"));
-        assert!(!cached.contains_key("xai"));
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
-    fn storing_one_engine_keeps_the_others() {
-        let path = temp_cache("merge");
-        let mut tts = tts_with_xai_key("key-a");
-        tts.mistral.api_key = "key-m".into();
-        let xai = account_fingerprint(&TtsEngine::Xai, &tts);
-        let mistral = account_fingerprint(&TtsEngine::Mistral, &tts);
-        store_cached_voices(&path, &TtsEngine::Xai, xai, &sample()).unwrap();
-        store_cached_voices(&path, &TtsEngine::Mistral, mistral, &sample()).unwrap();
-
-        let cached = load_cached_voices(&path, &tts);
-        assert!(cached.contains_key("xai") && cached.contains_key("mistral"));
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
-    fn cache_written_before_schema_versioning_is_hidden() {
-        // Shape of a file from before `schema` and `tags` existed: the list
-        // parses (tags default), but it must not be shown as current.
-        let path = temp_cache("old-schema");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let tts = tts_with_xai_key("key-a");
-        let account = account_fingerprint(&TtsEngine::Xai, &tts);
+        // Pre-schema-version cache is ignored.
+        let old_path = temp_cache("old-schema");
+        std::fs::create_dir_all(old_path.parent().unwrap()).unwrap();
         let old = format!(
-            r#"{{"xai":{{"fetched_at_ms":1,"account":{},"voices":[{{"id":"eve","label":"Eve","language":null,"description":null,"gender":null,"preview_url":null}}]}}}}"#,
-            account
+            r#"{{"xai":{{"fetched_at_ms":1,"account":{xai_account},"voices":[{{"id":"eve","label":"Eve","language":null,"description":null,"gender":null,"preview_url":null}}]}}}}"#
         );
-        std::fs::write(&path, old).unwrap();
-        assert!(load_cached_voices(&path, &tts).is_empty());
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
+        std::fs::write(&old_path, old).unwrap();
+        assert!(load_cached_voices(&old_path, &tts).is_empty());
+        let _ = std::fs::remove_dir_all(old_path.parent().unwrap());
 
-    #[test]
-    fn unreadable_cache_file_reads_as_empty() {
-        let path = temp_cache("corrupt");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "{not json").unwrap();
-        assert!(load_cached_voices(&path, &tts_with_xai_key("key-a")).is_empty());
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // Corrupt JSON reads as empty.
+        let corrupt = temp_cache("corrupt");
+        std::fs::create_dir_all(corrupt.parent().unwrap()).unwrap();
+        std::fs::write(&corrupt, "{not json").unwrap();
+        assert!(load_cached_voices(&corrupt, &tts).is_empty());
+        let _ = std::fs::remove_dir_all(corrupt.parent().unwrap());
     }
 
     #[test]

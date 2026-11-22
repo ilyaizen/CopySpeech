@@ -220,51 +220,42 @@ mod tests {
         JitWaiter::new(target(), Duration::from_secs(3), 1.0, now)
     }
 
-    /// The normal streaming case: the current fragment plays and the next one
-    /// is submitted only when its playback enters the lead window.
     #[test]
-    fn waits_until_the_playhead_is_within_the_lead() {
+    fn lead_window_opens_for_target_or_later_fragment_only() {
         let start = Instant::now();
-        let mut waiter = waiter(start);
-        let early = start + Duration::from_secs(5);
+        let mut w = waiter(start);
         assert_eq!(
-            waiter.observe(Some(progress(Some(1), 5_000)), early),
+            w.observe(Some(progress(Some(1), 5_000)), start + Duration::from_secs(5)),
             JitDecision::Wait
         );
-        let just_outside = start + Duration::from_secs(20);
         assert_eq!(
-            waiter.observe(Some(progress(Some(1), 26_000)), just_outside),
+            w.observe(
+                Some(progress(Some(0), 29_900)),
+                start + Duration::from_secs(6)
+            ),
             JitDecision::Wait
         );
-        let inside = start + Duration::from_secs(27);
         assert_eq!(
-            waiter.observe(Some(progress(Some(1), 27_500)), inside),
+            w.observe(
+                Some(progress(Some(1), 26_000)),
+                start + Duration::from_secs(20)
+            ),
+            JitDecision::Wait
+        );
+        assert_eq!(
+            w.observe(
+                Some(progress(Some(1), 27_500)),
+                start + Duration::from_secs(27)
+            ),
             JitDecision::Synthesize
         );
-    }
 
-    /// A caption that describes an earlier fragment (the batch path queues
-    /// fragments while the previous one plays) must not start the next one.
-    #[test]
-    fn an_earlier_fragment_does_not_open_the_window() {
-        let start = Instant::now();
-        let mut waiter = waiter(start);
-        let early = start + Duration::from_secs(2);
+        let mut jumped = waiter(start);
         assert_eq!(
-            waiter.observe(Some(progress(Some(0), 29_900)), early),
-            JitDecision::Wait
-        );
-    }
-
-    /// A playback that already moved past the target (a missed window) must
-    /// submit the next fragment at once instead of stalling the reading.
-    #[test]
-    fn a_later_fragment_opens_the_window_at_once() {
-        let start = Instant::now();
-        let mut waiter = waiter(start);
-        let now = start + Duration::from_secs(2);
-        assert_eq!(
-            waiter.observe(Some(progress(Some(2), 1_000)), now),
+            jumped.observe(
+                Some(progress(Some(2), 1_000)),
+                start + Duration::from_secs(2)
+            ),
             JitDecision::Synthesize
         );
     }
@@ -293,70 +284,101 @@ mod tests {
         );
     }
 
-    /// A dead caption clock must not hang the reading: after the grace period
-    /// the next fragment is submitted anyway.
     #[test]
-    fn a_dead_caption_clock_falls_back_to_submitting() {
+    fn dead_caption_clock_falls_back_and_recovers_when_fresh() {
         let start = Instant::now();
-        let mut waiter = waiter(start);
+        let mut fallback = waiter(start);
         let stale_since = start + Duration::from_secs(1);
-        assert_eq!(waiter.observe(None, stale_since), JitDecision::Wait);
+        assert_eq!(fallback.observe(None, stale_since), JitDecision::Wait);
         assert_eq!(
-            waiter.observe(
+            fallback.observe(
                 None,
                 stale_since + NO_PROGRESS_TIMEOUT - Duration::from_millis(1)
             ),
             JitDecision::Wait
         );
         assert_eq!(
-            waiter.observe(None, stale_since + NO_PROGRESS_TIMEOUT),
+            fallback.observe(None, stale_since + NO_PROGRESS_TIMEOUT),
             JitDecision::Synthesize
         );
-    }
 
-    /// A stale-caption gap that later recovers must not count toward the dead
-    /// clock fallback once fresh reports return.
-    #[test]
-    fn a_recovered_caption_resets_the_dead_clock() {
-        let start = Instant::now();
-        let mut waiter = waiter(start);
+        let mut recovered = waiter(start);
         assert_eq!(
-            waiter.observe(None, start + Duration::from_secs(4)),
+            recovered.observe(None, start + Duration::from_secs(4)),
             JitDecision::Wait
         );
         assert_eq!(
-            waiter.observe(
+            recovered.observe(
                 Some(progress(Some(1), 1_000)),
                 start + Duration::from_secs(4)
             ),
             JitDecision::Wait
         );
-        // The clock was alive at 4 s, so the stale window restarts from there.
         assert_eq!(
-            waiter.observe(None, start + Duration::from_secs(6)),
+            recovered.observe(None, start + Duration::from_secs(6)),
             JitDecision::Wait
         );
         assert_eq!(
-            waiter.observe(None, start + Duration::from_secs(11)),
+            recovered.observe(None, start + Duration::from_secs(11)),
             JitDecision::Synthesize
         );
     }
 
-    /// The wall-clock anchor catches a playhead that stopped reporting position
-    /// while audio kept playing: the window still opens before the fragment end.
     #[test]
-    fn a_throttled_position_still_opens_the_window_from_the_anchor() {
+    fn wall_clock_anchor_and_lead_scale_with_playback_rate() {
         let start = Instant::now();
-        let mut waiter = waiter(start);
-        let observed = start + Duration::from_secs(1);
+        let mut anchored = waiter(start);
         assert_eq!(
-            waiter.observe(Some(progress(Some(1), 1_000)), observed),
+            anchored.observe(
+                Some(progress(Some(1), 1_000)),
+                start + Duration::from_secs(1)
+            ),
             JitDecision::Wait
         );
-        // No new positions arrive; the fragment ends ~29 s after its start.
-        let late = start + Duration::from_secs(27);
         assert_eq!(
-            waiter.observe(Some(progress(Some(1), 1_000)), late),
+            anchored.observe(
+                Some(progress(Some(1), 1_000)),
+                start + Duration::from_secs(27)
+            ),
+            JitDecision::Synthesize
+        );
+
+        let mut fast = JitWaiter::new(target(), Duration::from_secs(3), 1.3, start);
+        assert_eq!(
+            fast.observe(
+                Some(progress(Some(1), 26_000)),
+                start + Duration::from_secs(20)
+            ),
+            JitDecision::Wait
+        );
+        assert_eq!(
+            fast.observe(
+                Some(progress(Some(1), 26_200)),
+                start + Duration::from_secs(20)
+            ),
+            JitDecision::Synthesize
+        );
+
+        let mut slow = JitWaiter::new(target(), Duration::from_secs(3), 0.5, start);
+        assert_eq!(
+            slow.observe(
+                Some(progress(Some(1), 1_000)),
+                start + Duration::from_secs(2)
+            ),
+            JitDecision::Wait
+        );
+        assert_eq!(
+            slow.observe(
+                Some(progress(Some(1), 1_000)),
+                start + Duration::from_secs(25)
+            ),
+            JitDecision::Wait
+        );
+        assert_eq!(
+            slow.observe(
+                Some(progress(Some(1), 1_000)),
+                start + Duration::from_secs(58)
+            ),
             JitDecision::Synthesize
         );
     }
@@ -382,61 +404,6 @@ mod tests {
             active: true,
         };
         assert_eq!(waiter.observe(Some(other), now), JitDecision::Wait);
-    }
-
-    /// At a non-default speed the wall-clock lead converts to media time: the
-    /// same 3 s of head start covers 1.3x more media position, because 1 s of
-    /// media plays in 1/1.3 s of wall time.
-    #[test]
-    fn the_lead_converts_to_media_time_at_a_non_default_speed() {
-        let start = Instant::now();
-        let mut waiter = JitWaiter::new(target(), Duration::from_secs(3), 1.3, start);
-        // 3 s wall is 3900 ms media: 26 000 + 3900 is still short of 30 000.
-        assert_eq!(
-            waiter.observe(
-                Some(progress(Some(1), 26_000)),
-                start + Duration::from_secs(20)
-            ),
-            JitDecision::Wait
-        );
-        assert_eq!(
-            waiter.observe(
-                Some(progress(Some(1), 26_200)),
-                start + Duration::from_secs(20)
-            ),
-            JitDecision::Synthesize
-        );
-    }
-
-    /// A slow non-default playback rate stretches the wall clock: the anchor
-    /// must not open the window while the media playhead is still early.
-    #[test]
-    fn the_anchor_scales_with_the_playback_rate() {
-        let start = Instant::now();
-        let mut waiter = JitWaiter::new(target(), Duration::from_secs(3), 0.5, start);
-        assert_eq!(
-            waiter.observe(
-                Some(progress(Some(1), 1_000)),
-                start + Duration::from_secs(2)
-            ),
-            JitDecision::Wait
-        );
-        // 1 s of media at half speed started at +0 s; 30 s of media ends at
-        // +60 s, so +25 s wall is still outside a 3 s lead.
-        assert_eq!(
-            waiter.observe(
-                Some(progress(Some(1), 1_000)),
-                start + Duration::from_secs(25)
-            ),
-            JitDecision::Wait
-        );
-        assert_eq!(
-            waiter.observe(
-                Some(progress(Some(1), 1_000)),
-                start + Duration::from_secs(58)
-            ),
-            JitDecision::Synthesize
-        );
     }
 
     /// The lead grows with the previous fragment's measured cost but stays
