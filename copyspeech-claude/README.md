@@ -34,7 +34,7 @@ Change the settings in one of four ways:
 
 - **Terminal:** run `claude`, type `/config`, and find the CopySpeech rows. A change applies at once.
 - **Any surface, auto-read only:** type `/copyspeech-autoread`. It turns **Read new replies aloud** on or off and saves it, as `/config` does.
-- **Desktop app:** type `/copyspeech-settings`. It opens the captions pane, and the settings sit in its header row behind **Settings ▸**. Each change saves, as `/config` does.
+- **Desktop app:** type `/copyspeech-settings`. It opens the captions pane, and the settings sit in its header row behind **Settings ▸**. Each change saves, as `/config` does, and applies at once.
 - **By file:** the Code tab has no settings screen for plugin options. Add a `pluginConfigs` block to `~/.claude/settings.json`:
 
 ```json
@@ -55,12 +55,12 @@ Change the settings in one of four ways:
 
 The key is the plugin's name as Claude Code loaded it: `copyspeech` or `copyspeech@inline` for a folder loaded with `--plugin-dir`, else the installed plugin's name. A setting you leave out keeps its default.
 
-- **Read new replies aloud** – off by default. Reads every text block of the finished turn as one reading.
+- **Read new replies aloud** – off by default. Reads the finished turn's last text block, the answer. Narration between tool calls is not read.
 - **Skip bullet points and sections** – on by default. Automatic and play-button reads skip headings, bullet and numbered items, horizontal rules, and table rows. The text under a heading still reads. A reply made only of those lines reads nothing.
 - **Read only part of the reply** – on by default. Automatic and play-button reads keep the top and bottom paragraphs.
 - **Part to read** – both (default), top, or bottom.
 - **Top paragraphs** and **Bottom paragraphs** – 1 to 20, 2 by default. The captions pane shows them but cannot change them, since the desktop app's settings list omits these two number rows. Change them in `/config` or the settings file.
-- **Show captions** – on by default. Opens the captions pane while CopySpeech reads.
+- **Show captions** – on by default. Opens the captions pane by itself when a reading starts. An open pane still marks the spoken word.
 
 Selection reads always read in full.
 
@@ -68,8 +68,8 @@ Selection reads always read in full.
 
 - Reads CopySpeech's `GET /status` every 120 ms while a reading plays.
 - Matches the caption words to the spoken text, which leaves out skipped lines and an excerpt gap: half the words of a caption fragment must match. Across an excerpt gap, it needs a run of 3 words to jump.
-- Opens a **CopySpeech Reader** pane when a reading starts, or with `/copyspeech-settings`. The pane stays open after a reading. It shows only the latest reading: a new reading replaces it. Hover a paragraph or a list item to show a **Read** button at its side: it reads only that paragraph or item.
-- The pane's header row holds the colored CopySpeech mark and its name, then the playbox. While nothing plays, the playbox is **Read**, which reads the latest turn's replies. While a reading plays, the name reads **CopySpeech Reading**, with **Pause** (or **Resume**) and **Stop**, as the band above the prompt does. **Settings ▸** sits in the same row; expand it to change a setting, and its body opens under the row. The header scrolls with the pane, so a long reply can move it out of view.
+- Opens a **CopySpeech Reader** pane when a reading starts, or with `/copyspeech-settings`. The pane stays open after a reading. It shows only the latest reading: a new reading replaces it. Hover a paragraph or a list item to show a **Read** button at its side: it reads only that paragraph or item, in full, whatever the trim settings. A block of only code or rules has no **Read** button.
+- The pane's header row holds the colored CopySpeech mark and its name, then the playbox. While nothing plays, the playbox is **Read**, which reads the last finished turn's answer, as auto-read does, else the replies the pane shows. While a reading plays, the name reads **CopySpeech Reading**, with **Pause** (or **Resume**) and **Stop**, as the band above the prompt does. **Settings ▸** sits in the same row; expand it to change a setting, and its body opens under the row. The header scrolls with the pane, so a long reply can move it out of view.
 - Draws the reading's replies in the pane block by block, as the transcript draws them. The block that holds the spoken word is drawn by the pane, with a chip on the word in reverse video: the text color behind it, with the background color over it. While the chip is in a block, that block's spacing can differ a little from the others. The pane's own drawing covers headings (larger for `#` and `##`), bullet and numbered lists with hanging indents, quotes, rules, tables as columns, and bold, italic, strikethrough, inline code and links (underlined; the target is dropped). A list is drawn line by line, so each item has its own **Read** button, which speaks that item even while **Skip bullet points and sections** is on. A table has no per-cell button. Fenced code blocks use Claude Code's code view and get no chip, since they are not read. In that block, nested blocks, `_italic_`, escapes, images and HTML are not drawn.
 - Scrolls the pane to center the paragraph that holds the spoken word. A paragraph taller than the pane shows its top.
 - The desktop app docks the pane beside the chat. The terminal docks it beside a fullscreen transcript from 110 columns, else shows it above the prompt. With **Read new replies aloud** on, submitting a prompt opens the pane, so each auto-read fills it at any width. An auto-read that opens the pane at turn end waits for 144 columns.
@@ -78,7 +78,7 @@ Selection reads always read in full.
 
 ## Double playback rule
 
-The repo's Claude Code hook (`scripts/claude-copyspeech-hook.mjs`, see [docs/agent-voice.md](../docs/agent-voice.md)) also speaks each final reply. If it is wired and **Read new replies aloud** is on, both speak. Use one of them for automatic reads.
+The repo's Claude Code hook (`scripts/claude-copyspeech-hook.mjs`) also speaks each final reply. If it is wired and **Read new replies aloud** is on, both speak. Use one of them for automatic reads.
 
 ## Limits
 

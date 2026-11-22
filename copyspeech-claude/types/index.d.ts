@@ -17,8 +17,11 @@ declare module "claude-code" {
       history: { row: string; md: string }[];
       /** Whether the captions pane's settings are expanded. */
       settingsOpen: boolean;
-      /** Settings the engine took, shown until the plugin reloads with them. Keyed by setting name. */
-      settingOverrides: Record<string, boolean | number | string>;
+      /** Setting writes the engine took, keyed by setting name: `to` replaces the loaded value `from` while the plugin still runs with `from`. */
+      settingOverrides: Record<
+        string,
+        { from: boolean | number | string; to: boolean | number | string }
+      >;
     };
   }
 }

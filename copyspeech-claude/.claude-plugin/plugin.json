@@ -50,7 +50,7 @@
     "captions": {
       "type": "boolean",
       "title": "Show captions",
-      "description": "Shows the reading in a captions pane and marks the spoken word there.",
+      "description": "Opens the captions pane by itself when a reading starts. An open pane marks the spoken word.",
       "default": true
     }
   }

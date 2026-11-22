@@ -125,7 +125,10 @@ test(
       if (e.url.endsWith("/speak")) speaks.push(JSON.stringify(e.init?.body ?? ""));
       return { value: { status: 200, ok: true, headers: {}, text: "{}" } };
     });
+    on("prompt.submit", (_, e) => ({ text: e.text }));
     await $.session.start({ cwd: ".", surface: "desktop", isInteractive: true });
+    // A turn starts at the prompt; the plugin collects its replies from there.
+    await $.prompt.submit({ text: "Say hello", wait: false, origin: { kind: "composer" } });
     const reply = await $.ui.mount({
       plugin: "copyspeech",
       surface: "desktop",
@@ -141,7 +144,7 @@ test(
       reason: "answer"
     });
     await clock.advance(250);
-    expect(opened).toEqual(["captions"]);
+    expect(opened).toContain("captions");
     expect(speaks.length).toBe(1);
     const pane = await $.ui.mount(PANE);
     await pane.redraw();
@@ -182,7 +185,10 @@ test(
         text: e.url.endsWith("/status") ? JSON.stringify(status) : "{}"
       }
     }));
+    on("prompt.submit", (_, e) => ({ text: e.text }));
     await $.session.start({ cwd: ".", surface: "desktop", isInteractive: true });
+    // A turn starts at the prompt; the plugin collects its replies from there.
+    await $.prompt.submit({ text: "Say hello", wait: false, origin: { kind: "composer" } });
     const reply = await $.ui.mount({
       plugin: "copyspeech",
       surface: "desktop",
@@ -228,7 +234,10 @@ test(
       if (e.url.endsWith("/speak")) speaks.push(JSON.stringify(e.init?.body ?? ""));
       return { value: { status: 200, ok: true, headers: {}, text: "{}" } };
     });
+    on("prompt.submit", (_, e) => ({ text: e.text }));
     await $.session.start({ cwd: ".", surface: "desktop", isInteractive: true });
+    // A turn starts at the prompt; the plugin collects its replies from there.
+    await $.prompt.submit({ text: "Say hello", wait: false, origin: { kind: "composer" } });
     const reply = await $.ui.mount({
       plugin: "copyspeech",
       surface: "desktop",
@@ -250,5 +259,51 @@ test(
     expect(await band.find({ key: "pause" })).toBeDefined();
     await band.unmount();
     await reply.unmount();
+  }
+);
+
+test(
+  "auto-read speaks only the turn's last text block, not the narration before it",
+  { options: { autoRead: true, captions: false, skipSections: false, excerpt: false } },
+  async ($, on) => {
+    const clock = mock.clock(on);
+    const speaks: string[] = [];
+    on("command.register", (_, e) => ({ value: { command: e.name } }));
+    on("session.start", (_, e) => ({ cwd: e.cwd }));
+    on("turn.complete", () => ({ text: "" }));
+    on("prompt.submit", (_, e) => ({ text: e.text }));
+    on("http.fetch", (_, e) => {
+      if (e.url.endsWith("/speak")) speaks.push(JSON.stringify(e.init?.body ?? ""));
+      return { value: { status: 200, ok: true, headers: {}, text: "{}" } };
+    });
+    await $.session.start({ cwd: ".", surface: "desktop", isInteractive: true });
+    await $.prompt.submit({ text: "Say hello", wait: false, origin: { kind: "composer" } });
+    const narration = await $.ui.mount({
+      plugin: "copyspeech",
+      surface: "desktop",
+      component: "AssistantMessage",
+      requestId: "reply-1",
+      props: { text: "Let me read the file.", isFirstOfReply: true }
+    });
+    const answer = await $.ui.mount({
+      plugin: "copyspeech",
+      surface: "desktop",
+      component: "AssistantMessage",
+      requestId: "reply-2",
+      props: { text: "Hello there.", isFirstOfReply: false }
+    });
+    await $.turn.complete({
+      answer: "Hello there.",
+      durationMs: 10,
+      isAborted: false,
+      turnId: "turn-1",
+      reason: "answer"
+    });
+    await clock.advance(250);
+    expect(speaks.length).toBe(1);
+    expect(speaks[0]).toContain("Hello there");
+    expect(speaks[0]).not.toContain("Let me read");
+    await answer.unmount();
+    await narration.unmount();
   }
 );

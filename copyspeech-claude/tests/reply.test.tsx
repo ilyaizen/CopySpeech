@@ -281,12 +281,22 @@ test("the header Read speaks the latest turn's replies when nothing plays", asyn
     if (e.url.endsWith("/speak")) bodies.push(JSON.stringify(e.init?.body ?? ""));
     return { value: { status: 200, ok: true, headers: {}, text: "{}" } };
   });
+  on("prompt.submit", (_, e) => ({ text: e.text }));
+  on("turn.complete", () => ({ text: "" }));
+  await $.prompt.submit({ text: "Say hello", wait: false, origin: { kind: "composer" } });
   const ui = await $.ui.mount({
     plugin: "copyspeech",
     surface: "desktop",
     component: "AssistantMessage",
     requestId: "reply-1",
     props: REPLY
+  });
+  await $.turn.complete({
+    answer: "Hello there.",
+    durationMs: 10,
+    isAborted: false,
+    turnId: "turn-1",
+    reason: "answer"
   });
   const pane = await $.ui.mount(PANE);
   await pane.press({ key: "pane-read" });

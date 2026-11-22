@@ -2,6 +2,7 @@ import { expect, test } from "claude-code/testing";
 
 import {
   align,
+  applyOverrides,
   captionWords,
   pickParagraphs,
   prepareLine,
@@ -120,4 +121,24 @@ test("captions align to the spoken words across a heading, a list, and an excerp
   const a = align(words, spoken.tokens, 0);
   expect(a.ok).toBe(true);
   words.forEach((w, i) => expect(spoken.tokens[a.map[i] ?? -1]?.norm).toBe(w.norm));
+});
+
+test("a setting override holds until the plugin loads a value other than the one it replaced", () => {
+  const loaded = {
+    autoRead: false,
+    skipSections: true,
+    excerpt: true,
+    excerptMode: "both",
+    excerptTop: 2,
+    excerptBottom: 2,
+    captions: true
+  };
+  const overrides = { autoRead: { from: false, to: true } };
+  expect(applyOverrides(loaded, overrides).autoRead).toBe(true);
+  // Once the plugin loads another value, the override is retired and the loaded value wins.
+  const stale = { autoRead: { from: false, to: false } };
+  expect(applyOverrides({ ...loaded, autoRead: true }, stale).autoRead).toBe(true);
+  // A bare value from an older build never holds.
+  // SAFETY: the old state shape, written before overrides carried `from`.
+  expect(applyOverrides(loaded, { autoRead: true } as never).autoRead).toBe(false);
 });

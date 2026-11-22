@@ -40,12 +40,53 @@ const noRows: ShownRow[] = [];
 const history = atom({ plugin: "copyspeech", key: "history" } as const, noRows);
 // Whether the captions pane's settings are expanded.
 const settingsOpen = atom({ plugin: "copyspeech", key: "settingsOpen" } as const, false);
-// The settings the pane shows after the engine took a write, until the plugin reloads with them.
-const noOverrides: Record<string, boolean | number | string> = {};
+type SettingValue = boolean | number | string;
+export type Settings = {
+  autoRead: boolean;
+  skipSections: boolean;
+  excerpt: boolean;
+  excerptMode: string;
+  excerptTop: number;
+  excerptBottom: number;
+  captions: boolean;
+};
+// A setting write the engine took: `to` replaces the loaded value `from`. It holds only while the
+// plugin still runs with `from`; a reload with any other value retires it.
+export type Override = { from: SettingValue; to: SettingValue };
+const noOverrides: Record<string, Override> = {};
 const settingOverrides = atom(
   { plugin: "copyspeech", key: "settingOverrides" } as const,
   noOverrides
 );
+
+// The settings in force: the loaded ones, with each override that still holds.
+export function applyOverrides(loaded: Settings, overrides: Record<string, Override>): Settings {
+  const now = new Map(Object.entries(loaded));
+  const out = { ...loaded };
+  for (const [field, o] of Object.entries(overrides)) {
+    // An entry from an older build is a bare value with no `from`, so it never holds.
+    // recordOverride writes each override with its own field's type.
+    if (now.has(field) && now.get(field) === o?.from) Object.assign(out, { [field]: o.to });
+  }
+  return out;
+}
+
+async function settingsNow($: EngineInterface, loaded: Settings): Promise<Settings> {
+  return applyOverrides(loaded, await read($, settingOverrides));
+}
+
+async function recordOverride(
+  $: EngineInterface,
+  field: string,
+  from: SettingValue,
+  to: SettingValue
+) {
+  await update($, settingOverrides, (o) => ({ ...o, [field]: { from, to } }));
+}
+
+function excerptOf(s: Settings): Excerpt | null {
+  return s.excerpt ? { mode: s.excerptMode, top: s.excerptTop, bottom: s.excerptBottom } : null;
+}
 
 type Token = { norm: string; start: number; end: number };
 type RowToken = Token & { row: string };
@@ -293,10 +334,20 @@ export function align(words: CaptionWord[], tokens: Token[], from: number) {
 
 // Rendered markdown per AssistantMessage row, and the rows first drawn in the
 // current turn (the auto-read target). Module variables restart on reload; the
-// atoms survive.
+// atoms survive. Rows are collected only while a main turn runs: after a reload
+// `rows` is empty, so every old reply that redraws would otherwise join the turn.
+// ponytail: a reload mid-turn collects nothing for that turn; the pane's Read still works.
 const rows = new Map<string, string>();
 let turnRows: string[] = [];
+// The last finished turn's answer row, for the pane's header Read.
+let lastTurnRows: string[] = [];
+let inTurn = false;
 let counter = 0;
+
+function beginTurn() {
+  turnRows = [];
+  inTurn = true;
+}
 type Run = {
   tokens: RowToken[];
   cursor: number;
@@ -308,6 +359,9 @@ type Run = {
   block: string;
   startedAt: number;
   lastActive: number;
+  // True once this reading's /speak answered. /status carries no request id, so before
+  // that it can still describe the reading this one replaced.
+  heard: boolean;
 };
 function freshRun(tokens: RowToken[], now: number): Run {
   return {
@@ -319,7 +373,8 @@ function freshRun(tokens: RowToken[], now: number): Run {
     mark: "",
     block: "",
     startedAt: now,
-    lastActive: 0
+    lastActive: 0,
+    heard: false
   };
 }
 let run = freshRun([], 0);
@@ -367,14 +422,17 @@ async function paint($: EngineInterface, row: string, at: [number, number] | nul
   if (moved.deny === undefined) run.block = block;
 }
 
-async function clear($: EngineInterface) {
-  await paint($, "", null);
-  await update($, reading, () => null);
-}
-
-// Clears the reading a poll read, unless a newer reading has started since.
+// Clears reading `id`, unless a newer reading has started. The check sits inside the write,
+// so a start that lands meanwhile keeps its reading.
 async function endIfCurrent($: EngineInterface, id: string) {
-  if ((await read($, reading))?.id === id) await clear($);
+  const mine = run;
+  let ended = false;
+  await update($, reading, (r) => {
+    if (r?.id !== id) return r;
+    ended = true;
+    return null;
+  });
+  if (ended && run === mine) await paint($, "", null);
 }
 
 // `$.http.fetch` gives up after 30 s with no answer. CopySpeech answers a
@@ -388,8 +446,18 @@ function shownRows(ids: string[]): ShownRow[] {
   return ids.filter((row) => rows.has(row)).map((row) => ({ row, md: rows.get(row) ?? "" }));
 }
 
+// Starts run one at a time: two overlapping starts would each miss the other's reading, and
+// both would play.
+// ponytail: a start waits for the previous /speak's answer, up to 30 s when CopySpeech queues it.
+let starting: Promise<void> = Promise.resolve();
+function start($: EngineInterface, ids: string[], text: Spoken): Promise<void> {
+  const next = starting.then(() => startNow($, ids, text));
+  starting = next.catch(() => undefined);
+  return next;
+}
+
 // Speaks `text`; the captions pane shows `ids`, the AssistantMessage rows it comes from.
-async function start($: EngineInterface, ids: string[], text: Spoken) {
+async function startNow($: EngineInterface, ids: string[], text: Spoken) {
   // Nothing to say keeps the reading that plays: a press on a silent block must not stop it.
   if (text.speech.trim() === "" || ids.length === 0) return;
   const current = await read($, reading);
@@ -397,13 +465,28 @@ async function start($: EngineInterface, ids: string[], text: Spoken) {
   counter += 1;
   const id = `claude.${Date.now()}.${counter}`;
   await paint($, "", null);
-  run = freshRun(text.tokens, await $.clock.now());
-  await update($, history, () => shownRows(ids));
+  const mine = freshRun(text.tokens, await $.clock.now());
+  run = mine;
+  // A selection outside any reply has no rows to show; the pane keeps what it had.
+  const before = await read($, history);
+  const shown = shownRows(ids);
+  if (shown.length > 0) await update($, history, () => shown);
   await update($, reading, (): Reading => ({ id, rows: ids, paused: false }));
   const failure = await post($, "/speak", { text: text.speech, request_id: id, wait: false });
-  if (failure === null || STILL_RUNNING.test(failure)) return;
-  $.ui.toast(`CopySpeech /speak failed: ${failure}`);
-  if ((await read($, reading))?.id === id) await clear($);
+  if (failure !== null && !STILL_RUNNING.test(failure)) {
+    $.ui.toast(`CopySpeech /speak failed: ${failure}`);
+    if ((await read($, reading))?.id === id) await update($, history, () => before);
+    await endIfCurrent($, id);
+    return;
+  }
+  // Stopped or replaced while /speak waited: stop this one too, or it plays untracked.
+  if ((await read($, reading))?.id !== id) {
+    await post($, "/stop", { request_id: id });
+    return;
+  }
+  // Audible, or queued past the fetch's give-up: statuses from here on are this reading's.
+  mine.heard = true;
+  mine.startedAt = await $.clock.now();
 }
 
 // Opens the captions pane while captions are on. Called from a press it is asked, so
@@ -413,28 +496,51 @@ async function openPane($: EngineInterface, captions: boolean) {
 }
 
 // A /stop with no request_id is CopySpeech's global stop, as the tray's Stop
-// reading: it also aborts every queued and running synthesis.
-async function stop($: EngineInterface) {
-  await clear($);
-  await post($, "/stop", {});
+// reading: it also aborts every queued and running synthesis. The band clears at
+// once, so a CopySpeech that is down cannot leave it stuck. Resolves the failure, or null.
+async function stop($: EngineInterface): Promise<string | null> {
+  await paint($, "", null);
+  await update($, reading, () => null);
+  return post($, "/stop", {});
 }
 
 // Pause or Resume the reading. The band above the prompt and the pane's header row draw it.
 const pauseOrResume = ($: EngineInterface, r: Reading) => () =>
-  void $.clock.after(0, () =>
-    post($, r.paused ? "/resume" : "/pause", { request_id: r.id }).then(() => undefined)
-  );
+  void $.clock.after(0, async () => {
+    const verb = r.paused ? "resume" : "pause";
+    const failure = await post($, `/${verb}`, { request_id: r.id });
+    if (failure !== null) $.ui.toast(`CopySpeech /${verb} failed: ${failure}`);
+  });
 
 // Stops the reading, as the band's and the pane's Stop do.
 const stopReading = ($: EngineInterface) => () =>
-  void $.clock.after(0, () => void stop($).catch(() => undefined));
+  void $.clock.after(0, async () => {
+    const failure = await stop($);
+    if (failure !== null) $.ui.toast(`CopySpeech /stop failed: ${failure}`);
+  });
 
+// One poll at a time: a /status slower than POLL_MS would start a second, and answers that
+// land out of order move the chip back or flip Pause and Resume.
+let polling = false;
 async function poll($: EngineInterface) {
+  if (polling) return;
+  polling = true;
+  try {
+    await pollOnce($);
+  } finally {
+    polling = false;
+  }
+}
+
+async function pollOnce($: EngineInterface) {
   const current = await read($, reading);
-  if (current === null) return;
+  // Until /speak answers, /status may still describe the reading this one replaced.
+  const run0 = run;
+  if (current === null || !run0.heard) return;
   const now = await $.clock.now();
   const res = await $.http.fetch(CONTROL + "/status").catch(() => null);
-  if (res === null || !res.ok) return;
+  // A start since the fetch began owns `run` now; this answer is not its.
+  if (res === null || !res.ok || run !== run0) return;
   let s: Status;
   try {
     // SAFETY: /status is CopySpeech's own control-server contract, and every
@@ -470,6 +576,7 @@ async function poll($: EngineInterface) {
   const paused = s.paused === true;
   if (paused !== current.paused) {
     await update($, reading, (r) => (r?.id === current.id ? { ...r, paused } : r));
+    if (run !== run0) return;
   }
   const pos = s.position_ms ?? 0;
   const i = run.words.findIndex((w) => pos >= w.start_ms && pos < w.end_ms);
@@ -482,27 +589,21 @@ async function poll($: EngineInterface) {
 // The plugin's own `/config` row for one `userConfig` field, when the list returns it. On the
 // desktop app the list may return none of the plugin's rows, so writes do not depend on it.
 async function settingRow($: EngineInterface, field: string) {
-  return (await $.config.list()).find(
-    (r) => r.key.startsWith("copyspeech") && r.key.endsWith(`.${field}`)
-  );
+  const list = await $.config.list().catch(() => []);
+  return list.find((r) => r.key.startsWith("copyspeech") && r.key.endsWith(`.${field}`));
 }
 
-// The keys a `config.set` may take for one field: the listed row's, else the two names a
-// plugin's row takes, `<name>@inline` (a folder loaded with --plugin-dir) and `<name>`.
-async function settingKeys($: EngineInterface, field: string): Promise<string[]> {
-  const row = await settingRow($, field);
-  if (row !== undefined) return [row.key];
-  return [`${PLUGIN_NAME}@inline.${field}`, `${PLUGIN_NAME}.${field}`];
-}
-
-// Writes one of the plugin's settings, trying each key. Resolves undefined on a write, else
-// the reason the last key was refused.
+// Writes one of the plugin's settings, trying each key: the listed row's, else the two names a
+// plugin's row takes, `<name>@inline` (a folder loaded with --plugin-dir) and `<name>`. Resolves
+// undefined on a write, else the reason the last key was refused.
 async function writeSetting(
   $: EngineInterface,
+  row: { key: string } | undefined,
   field: string,
-  value: boolean | number | string
+  value: SettingValue
 ): Promise<string | undefined> {
-  const keys = await settingKeys($, field);
+  const keys =
+    row === undefined ? [`${PLUGIN_NAME}@inline.${field}`, `${PLUGIN_NAME}.${field}`] : [row.key];
   let deny = `no ${field} row`;
   for (const key of keys) {
     const res = await $.config.set({ key, value }).catch((err) => ({ deny: String(err) }));
@@ -512,54 +613,50 @@ async function writeSetting(
   return `${deny} (tried ${keys.join(", ")})`;
 }
 
+// Writes one setting and, once the engine takes it, records it so the plugin uses it before
+// a reload. Resolves a deny's reason.
+async function saveSetting(
+  $: EngineInterface,
+  loaded: Settings,
+  field: keyof Settings,
+  value: SettingValue
+): Promise<string | undefined> {
+  const deny = await writeSetting($, await settingRow($, field), field, value);
+  if (deny === undefined) await recordOverride($, field, loaded[field], value);
+  return deny;
+}
+
 // Flips the "Read new replies aloud" setting, as if the person changed it in /config. The
-// listed value wins; without a listed row, `loaded` (the value the plugin loaded with) does.
-// Resolves the reply text.
-async function toggleAutoRead($: EngineInterface, loaded: boolean): Promise<string> {
+// listed value wins; without a listed row, the value in force does. Resolves the reply text.
+async function toggleAutoRead($: EngineInterface, loaded: Settings): Promise<string> {
   const row = await settingRow($, "autoRead");
-  const enabled = !(row === undefined ? loaded : row.value === true);
-  const deny = await writeSetting($, "autoRead", enabled);
+  const enabled = !(row === undefined
+    ? (await settingsNow($, loaded)).autoRead
+    : row.value === true);
+  const deny = await writeSetting($, row, "autoRead", enabled);
   if (deny !== undefined) return `CopySpeech auto-read unchanged: ${deny}`;
+  await recordOverride($, "autoRead", loaded.autoRead, enabled);
   return enabled ? "CopySpeech auto-read is on." : "CopySpeech auto-read is off.";
 }
 
-// Writes one of the plugin's settings from the captions pane. Resolves a deny's reason.
-async function setSetting(
-  $: EngineInterface,
-  field: string,
-  value: boolean | number | string
-): Promise<string | undefined> {
-  return writeSetting($, field, value);
-}
-
 export const register: Register = (on, options) => {
-  const showWord = options.captions !== false;
-  const skip = options.skipSections === true;
-  const excerpt: Excerpt | null =
-    options.excerpt === false
-      ? null
-      : {
-          mode: String(options.excerptMode ?? "both"),
-          top: Number(options.excerptTop ?? 2),
-          bottom: Number(options.excerptBottom ?? 2)
-        };
-  const forRead = (ids: string[]) =>
-    prepareSpeech(
-      ids.map((row) => ({ row, md: rows.get(row) ?? "" })),
-      skip,
-      excerpt
-    );
-  // The plugin's settings as the captions pane draws them. A change reloads the plugin,
-  // so these follow the new values.
-  const settingValues = {
+  // The settings the plugin loaded with. A write from the pane or /copyspeech-autoread
+  // applies at once through `settingOverrides` (settingsNow), before any reload.
+  const loaded: Settings = {
     autoRead: options.autoRead === true,
-    skipSections: skip,
+    skipSections: options.skipSections === true,
     excerpt: options.excerpt !== false,
     excerptMode: String(options.excerptMode ?? "both"),
     excerptTop: Number(options.excerptTop ?? 2),
     excerptBottom: Number(options.excerptBottom ?? 2),
-    captions: showWord
+    captions: options.captions !== false
   };
+  const forRead = (s: Settings, ids: string[]) =>
+    prepareSpeech(
+      ids.map((row) => ({ row, md: rows.get(row) ?? "" })),
+      s.skipSections,
+      excerptOf(s)
+    );
 
   on("session.start", async ($, e, next) => {
     await $.command.register({
@@ -585,12 +682,12 @@ export const register: Register = (on, options) => {
   });
 
   on("command.run", { command: "copyspeech-stop" }, async ($) => {
-    await stop($);
-    return { text: "Stopped." };
+    const failure = await stop($);
+    return { text: failure === null ? "Stopped." : `CopySpeech /stop failed: ${failure}` };
   });
 
   on("command.run", { command: "copyspeech-autoread" }, async ($) => ({
-    text: await toggleAutoRead($, options.autoRead === true)
+    text: await toggleAutoRead($, loaded)
   }));
 
   on("command.run", { command: "copyspeech-settings" }, async ($) => {
@@ -600,30 +697,36 @@ export const register: Register = (on, options) => {
 
   // The person's own prompt places the captions pane at any width. An auto-read that opens
   // it at turn end is unasked, and the engine may hold that open undrawn on a narrow window.
+  // A prompt starts a turn: the person's own, so turn.start also starting one is harmless.
   on("prompt.submit", async ($, e, next) => {
-    if (options.autoRead === true && e.isMeta !== true) void openPane($, showWord);
+    if (e.isMeta !== true) {
+      beginTurn();
+      const s = await settingsNow($, loaded);
+      if (s.autoRead) void openPane($, s.captions);
+    }
     return next(e);
   });
 
   on("turn.start", async ($, e, next) => {
-    if (e.agentId === undefined) turnRows = [];
+    if (e.agentId === undefined) beginTurn();
     return next(e);
   });
 
   on("turn.complete", async ($, e, next) => {
     const result = await next(e);
-    if (
-      options.autoRead === true &&
-      e.reason === "answer" &&
-      e.agentId === undefined &&
-      turnRows.length > 0
-    ) {
-      // Every text block the turn drew, joined, as one reading.
-      const ids = turnRows;
+    if (e.agentId !== undefined) return result;
+    inTurn = false;
+    // The turn's last text block: the answer. Earlier blocks are mostly narration between tool
+    // calls ("Let me read the file"), and the excerpt's top paragraphs would land on them.
+    const ids = turnRows.slice(-1);
+    if (ids.length === 0) return result;
+    lastTurnRows = ids;
+    const s = await settingsNow($, loaded);
+    if (s.autoRead && e.reason === "answer") {
       void $.clock.after(0, async () => {
         // The pane may wait undrawn (below 144 columns), so the reading never waits for it.
-        void openPane($, showWord);
-        await start($, ids, forRead(ids)).catch(() => undefined);
+        void openPane($, s.captions);
+        await start($, ids, forRead(s, ids)).catch(() => undefined);
       });
     }
     return result;
@@ -631,8 +734,9 @@ export const register: Register = (on, options) => {
 
   on("ui.render", { component: "AssistantMessage" }, async ($, e, next) => {
     if (e.props.isSummary === true) return next(e);
-    if (!rows.has(e.requestId)) turnRows.push(e.requestId);
+    if (inTurn && !rows.has(e.requestId)) turnRows.push(e.requestId);
     rows.set(e.requestId, e.props.text);
+    const s = await settingsNow($, loaded);
     const r = await read($, reading);
     const isMine = r !== null && r.rows.includes(e.requestId);
     const ui = $.ui.resolve(e);
@@ -645,10 +749,10 @@ export const register: Register = (on, options) => {
         key={`play-${e.requestId}`}
         label={e.surface === "terminal" ? "▶ Read" : "Read"}
         onPress={() => {
-          void openPane($, showWord);
+          void openPane($, s.captions);
           void $.clock.after(
             0,
-            () => void start($, [e.requestId], forRead([e.requestId])).catch(() => undefined)
+            () => void start($, [e.requestId], forRead(s, [e.requestId])).catch(() => undefined)
           );
         }}
       />
@@ -707,21 +811,11 @@ export const register: Register = (on, options) => {
         <ui.Svg source={ICON_SVG} alt="CopySpeech" width={16} height={16} />
       ) : null;
     // Buttons here redraw with every spoken word. The header row shows them while a reading plays anyway.
-    // What the pane shows: a value the engine took, else the one the plugin loaded with.
-    // SAFETY: `save` keys each override by its setting's name and writes it with that setting's type.
-    const shown = {
-      ...settingValues,
-      ...(await read($, settingOverrides))
-    } as typeof settingValues;
-    const save = (field: string, value: boolean | number | string) => () =>
+    const shown = await settingsNow($, loaded);
+    const save = (field: keyof Settings, value: SettingValue) => () =>
       void $.clock.after(0, async () => {
-        const deny = await setSetting($, field, value).catch(() => undefined);
-        if (deny !== undefined) {
-          $.ui.toast(`CopySpeech ${field} unchanged: ${deny}`);
-          return;
-        }
-        // The engine took it: show it now, before the plugin reloads with the new value.
-        await update($, settingOverrides, (o) => ({ ...o, [field]: value }));
+        const deny = await saveSetting($, loaded, field, value).catch((err) => String(err));
+        if (deny !== undefined) $.ui.toast(`CopySpeech ${field} unchanged: ${deny}`);
       });
     const toggle = (field: "autoRead" | "skipSections" | "excerpt" | "captions", label: string) => (
       <Button
@@ -762,11 +856,12 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     );
-    // Reads one paragraph of the reply, [from, to), with the captions for that reading.
+    // Reads one paragraph of the reply, [from, to), with the captions for that reading. The
+    // person pressed it, so it reads in full, with no skip or excerpt, as a list item does.
     const readParagraph = (row: string, md: string, from: number, to: number) => () =>
       void $.clock.after(0, () => {
         rows.set(row, md);
-        void start($, [row], prepareSpeech([{ row, md, from, to }], skip, excerpt)).catch(
+        void start($, [row], prepareSpeech([{ row, md, from, to }], false, null)).catch(
           () => undefined
         );
       });
@@ -928,24 +1023,28 @@ export const register: Register = (on, options) => {
             }
             const holdsWord =
               s !== null && s.row === entry.row && s.at[0] >= b.start && s.at[0] < b.end;
+            // Code and rules are never spoken, so a block of only those gets no Read button.
+            const silent = lines.every((ln) => ln.kind === "fence" || ln.kind === "rule");
             return (
               <Box key={blockKey(entry.row, n)} flexDirection="column">
                 <Box flexDirection="column">
                   {holdsWord ? (
-                    blockLines(entry.md, b).map((ln, k) => drawLine(ln, k))
+                    lines.map((ln, k) => drawLine(ln, k))
                   ) : (
                     <Markdown text={entry.md.slice(b.start, b.end)} />
                   )}
                 </Box>
-                <Box
-                  position="absolute"
-                  right={0}
-                  top={0}
-                  display="none"
-                  hover={{ display: "flex" }}
-                >
-                  {paragraphRead(entry.row, entry.md, n, b)}
-                </Box>
+                {silent ? null : (
+                  <Box
+                    position="absolute"
+                    right={0}
+                    top={0}
+                    display="none"
+                    hover={{ display: "flex" }}
+                  >
+                    {paragraphRead(entry.row, entry.md, n, b)}
+                  </Box>
+                )}
               </Box>
             );
           })}
@@ -954,12 +1053,19 @@ export const register: Register = (on, options) => {
     });
     // The header row: the CopySpeech mark, its name, then the playbox. While a reading plays the
     // name reads CopySpeech Reading, with Pause or Resume and Stop. While nothing plays it shows
-    // Read, which reads the latest turn's replies as auto-read does. Settings is always here, and
-    // its body opens under the row. The header scrolls with the pane body.
+    // Read, which reads the last finished turn's answer as auto-read does, else the replies the
+    // pane shows. Settings is always here, and its body opens under the row. The header scrolls
+    // with the pane body.
     const readLatest = () =>
       void $.clock.after(0, () => {
-        const ids = turnRows;
-        void start($, ids, forRead(ids)).catch(() => undefined);
+        // After a reload `rows` is empty; the pane's own history still holds the text.
+        for (const h of list) if (!rows.has(h.row)) rows.set(h.row, h.md);
+        const ids = lastTurnRows.length > 0 ? lastTurnRows : list.map((h) => h.row);
+        if (ids.length === 0) {
+          $.ui.toast("CopySpeech has no reply to read yet.");
+          return;
+        }
+        void start($, ids, forRead(shown, ids)).catch(() => undefined);
       });
     const header = (
       <Box flexDirection="row" flexWrap="wrap" gap="xs" alignItems="center">
@@ -998,6 +1104,7 @@ export const register: Register = (on, options) => {
     const selected = e.props.selection?.text;
     const row = e.props.row;
     if (selected === undefined || selected.trim() === "") return next(e);
+    const { captions } = await settingsNow($, loaded);
     const { Button, Text } = $.ui.resolve(e);
     // A selection inside a reply paints there; elsewhere it reads without captions.
     const target = row?.component === "AssistantMessage" ? row.requestId : "none";
@@ -1005,7 +1112,7 @@ export const register: Register = (on, options) => {
       <Button
         key="read-selection"
         onPress={() => {
-          if (target !== "none") void openPane($, showWord);
+          if (target !== "none") void openPane($, captions);
           void $.clock.after(
             0,
             () =>

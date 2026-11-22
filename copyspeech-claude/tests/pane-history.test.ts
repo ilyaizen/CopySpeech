@@ -290,11 +290,11 @@ test("each list item has its own Read button and speaks alone", async ($, on) =>
   await reply.unmount();
 });
 
-test("a paragraph's Read button on a block with nothing to say keeps the reading", async ($, on) => {
+test("a heading's Read button reads it even with Skip sections on; a code block has no Read button", async ($, on) => {
   const clock = mock.clock(on);
-  const calls: string[] = [];
+  const bodies: string[] = [];
   on("http.fetch", (_, e) => {
-    calls.push(e.url.slice(e.url.lastIndexOf("/")));
+    if (e.url.endsWith("/speak")) bodies.push(JSON.stringify(e.init?.body ?? ""));
     return { value: { status: 200, ok: true, headers: {}, text: "{}" } };
   });
   const reply = await $.ui.mount({
@@ -303,19 +303,18 @@ test("a paragraph's Read button on a block with nothing to say keeps the reading
     component: "AssistantMessage",
     requestId: "reply-3",
     props: {
-      text: "First paragraph here.\n\n## A heading\n\nThird paragraph here.",
+      text: "First paragraph here.\n\n## A heading\n\n```\nnot spoken\n```",
       isFirstOfReply: true
     }
   });
   await reply.press({ key: "play-reply-3" });
   await clock.advance(250);
   const pane = await $.ui.mount(PANE);
-  const before = calls.length;
-  // Skip sections is on by default, so the heading block has no speech.
+  expect(await pane.find({ key: "read-reply-3-2" })).toBeUndefined();
+  // Skip sections is on by default; a pressed paragraph still reads in full.
   await pane.press({ key: "read-reply-3-1" });
   await clock.advance(250);
-  expect(calls.slice(before)).not.toContain("/stop");
-  expect(calls.slice(before)).not.toContain("/speak");
+  expect(bodies.at(-1)).toContain("A heading");
   await pane.unmount();
   await reply.unmount();
 });

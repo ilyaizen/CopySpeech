@@ -107,15 +107,16 @@ export function blockLines(md: string, block: Block): Line[] {
     const at = offset;
     offset += line.length + 1;
     const end = at + line.length;
-    if (FENCE_LINE.test(line)) {
+    let fence = fenceAfter(null, line);
+    if (fence !== null) {
       const open = line.trim();
-      const mark = open.slice(0, 3);
       const code: string[] = [];
       while (n + 1 < lines.length) {
         n += 1;
         const inner = lines[n] ?? "";
         offset += inner.length + 1;
-        if (inner.trim().startsWith(mark)) break;
+        fence = fenceAfter(fence, inner);
+        if (fence === null) break;
         code.push(inner);
       }
       out.push({
