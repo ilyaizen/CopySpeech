@@ -70,7 +70,7 @@ type StatusReport = {
   };
 };
 
-test("a bare inactive status waits out the idle wait before the reading ends", async ($, on) => {
+test("a bare inactive status ends a heard reading at once", async ($, on) => {
   const clock = mock.clock(on);
   on("command.register", (_, e) => ({ value: { command: e.name } }));
   on("session.start", (_, e) => ({ cwd: e.cwd }));
@@ -111,10 +111,6 @@ test("a bare inactive status waits out the idle wait before the reading ends", a
   expect(await pane.find({ key: "pane-pause" })).toBeDefined();
   status = { active: false };
   await clock.advance(250);
-  await pane.redraw();
-  // A bare report is also the app's answer after a silent stretch, so the idle wait still applies.
-  expect(await pane.find({ key: "pane-pause" })).toBeDefined();
-  await clock.advance(2500);
   await pane.redraw();
   expect(await pane.find({ key: "pane-pause" })).toBeUndefined();
   await pane.unmount();
@@ -165,12 +161,9 @@ test("a stall while synthesis catches up keeps the reading; a bare inactive stat
   // Playback resumes.
   status = { ...status, active: true, position_ms: 900 };
   await clock.advance(250);
-  // The app's end: a bare report, then the idle wait.
+  // The app's end: a bare report ends the reading at once.
   status = { active: false };
   await clock.advance(250);
-  await pane.redraw();
-  expect(await pane.find({ key: "pane-pause" })).toBeDefined();
-  await clock.advance(2500);
   await pane.redraw();
   expect(await pane.find({ key: "pane-pause" })).toBeUndefined();
   await pane.unmount();
