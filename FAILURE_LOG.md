@@ -12,7 +12,7 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 - Give `TimeStretcher`'s first output after every reset a ~5 ms fade-in, and hold the last ~5 ms of input out of the WSOLA flush. Otherwise fragment seams click.
 - Anchor PCM skip targets to `_stallPosition` in `pcm-stream.ts`. `_mediaNow()` collapses to 0 when no scheduled source covers the playhead, so `mediaNow - n` alone jumps to the timeline start.
 - Re-sync `playbackStore` from its own `config-changed` listener. Pages that only `set_config` never update it.
-- Gate streaming playback off when the active profile has an effect: the PCM scheduler has no effect chain. Only the `audio-fragment-ready` path applies effects.
+- Streaming playback takes the batch `audio-fragment-ready` path for a whole-buffer effect (all but walkie-talkie, see `effect_streams_live`), a speed other than 1, or a cold backend (`allows_streaming_playback`). Walkie-talkie runs live on the PCM path (`effects/live.ts`).
 - Emit the streaming `is_final` marker on the last fragment only. An intermediate one arms the completion timer mid-passage.
 - Signal a failed streamed reading with `playback-stream-failed` and its `session_id`, never `playback-stop` (which cuts every reading).
 - Reset a completed reading's retained replay fragments when the next reading starts. A streamed reading queues none and would inherit them.
@@ -25,7 +25,7 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 - Stop a failed audible reading alone. Never call `handleStop` from the owner-failure branch.
 - Drain held stream runs by lowest reading id, streamed before queued batch fragments (streamed PCM cannot be regenerated). Signal each batch reading at its final audible fragment. Keep completion signals per reading until its wait consumes them.
 - Drive HUD captions from the audible fragment's audio clock. Incoming PCM must not resume a user-paused stream.
-- `hud:*` events fire only while the HUD is enabled. Main-window UI reads `playbackStore.caption` and `reading-started`, never HUD events. Gate the `hud:caption` emit on `_hudEnabled`.
+- `hud:*` events fire only while the HUD is enabled. Main-window UI reads `playbackStore.caption` and `reading-started`, never HUD events. Gate the `hud:caption` emit and the analyser's per-frame `hud:amplitude` emit on `_hudEnabled`; the ungated amplitude loop sent ~55 IPC calls per second to a disabled HUD.
 - Duck other apps per session and skip our whole process tree, not our PID: the audio session belongs to a `msedgewebview2` child. Persist originals to `duck-state.json`, since per-app mixer volumes survive a crash.
 - "Beeps" in generated audio: suspect unpronounceable glyphs in the text before the playback code. Keep `remove_unpronounceable`'s symbol ranges ahead of what vendors confound.
 - Measure a provider WAV's duration from its parsed header clamped to the real byte count, never by iterating the container (Fish writes `0xFFFFFF00` into the data size and rodio spins past EOF).

@@ -7,9 +7,12 @@ import { toast } from "svelte-sonner";
 import { playbackStore } from "../playback-store.svelte";
 import { testConfig } from "#lib/test-fixtures/app-config.js";
 import { PcmStreamScheduler, type StreamChunkPayload } from "../playback/pcm-stream";
+import type { AnalyserConfig } from "../playback/analyser.js";
 
-const { listeners, live, ipc } = vi.hoisted(() => ({
+const { listeners, live, ipc, analyserConfigs } = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => Promise<void>>(),
+  // Config each `AudioAnalyser.setup` received, newest last.
+  analyserConfigs: new Array<AnalyserConfig>(),
   // Every registration not yet unlistened, including ones the Map overwrote.
   live: new Set<unknown>(),
   // Every `listen` waits on this, so a test can hold setup mid-registration.
@@ -36,7 +39,9 @@ vi.mock("../playback/analyser.js", () => ({
     getAnalyser() {
       return null;
     }
-    setup() {}
+    setup(_audio: HTMLAudioElement, _context: AudioContext, config: AnalyserConfig) {
+      analyserConfigs.push(config);
+    }
     start() {}
     stop() {}
     destroy() {}
@@ -314,6 +319,27 @@ it("sends no HUD caption events while the HUD is off, but keeps the Play page an
       caption: playbackStore.caption
     });
   }
+});
+
+it("gates the amplitude loop's HUD frames on the HUD flag", async () => {
+  await sendAudio(0);
+  const gate = analyserConfigs.at(-1)?.hudEnabled;
+  expect(gate?.()).toBe(true);
+
+  playbackStore.setHudEnabled(false);
+  expect(gate?.()).toBe(false);
+
+  const config = testConfig();
+  config.hud.enabled = true;
+  config.general.experimental_enabled = true;
+  vi.mocked(invoke).mockResolvedValueOnce(config);
+  await listeners.get("config-changed")!({ payload: null });
+  expect(gate?.()).toBe(true);
+
+  config.general.experimental_enabled = false;
+  vi.mocked(invoke).mockResolvedValueOnce(config);
+  await listeners.get("config-changed")!({ payload: null });
+  expect(gate?.()).toBe(false);
 });
 
 it("reports the caption snapshot for the control server, and inactive on stop", async () => {

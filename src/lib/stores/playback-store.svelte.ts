@@ -413,8 +413,9 @@ class PlaybackStore {
   // Wall-clock time of the last caption report for the control server's
   // `GET /status`; the caption clock ticks every 25 ms.
   private _lastCaptionReport = 0;
-  // Mirrors `hud.enabled` (Experimental-gated). While false, no caption frame
-  // crosses to the HUD window; the Play page and `/status` still get every tick.
+  // Mirrors `hud.enabled` (Experimental-gated). While false, no caption or
+  // amplitude frame crosses to the HUD window; the Play page and `/status`
+  // still get every caption tick.
   private _hudEnabled = false;
   private _streamCaptions = new Map<
     number,
@@ -683,7 +684,8 @@ class PlaybackStore {
       // Wire AnalyserNode once per audio element (guard prevents double-wiring)
       if (this._audioEl && !this._analyser.getAnalyser()) {
         this._analyser.setup(this._audioEl, this._audioCtx, {
-          emitTo: this._emitTo
+          emitTo: this._emitTo,
+          hudEnabled: () => this._hudEnabled
         });
       }
 
@@ -1212,7 +1214,7 @@ class PlaybackStore {
     else this.pausePlayback();
   }
 
-  // Mirrors the HUD gate: no `hud:caption` frame crosses to the HUD window while it is off.
+  // Mirrors the HUD gate: no `hud:caption` or `hud:amplitude` frame crosses to the HUD window while it is off.
   setHudEnabled(enabled: boolean) {
     this._hudEnabled = enabled;
   }

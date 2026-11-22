@@ -13,6 +13,8 @@ export interface AnalyserConfig {
   fftSize?: number;
   smoothingTimeConstant?: number;
   emitTo?: ((target: string, name: string, payload: EmitPayload) => Promise<void>) | null;
+  /** The HUD gate (Experimental + `hud.enabled`). Amplitude frames go only to the HUD window. */
+  hudEnabled?: () => boolean;
 }
 
 export class AudioAnalyser {
@@ -21,6 +23,7 @@ export class AudioAnalyser {
   private _amplitudeLoopId: number | null = null;
   private _lastEmitTime = 0;
   private _emitTo: AnalyserConfig["emitTo"] = null;
+  private _hudEnabled: () => boolean = () => false;
 
   /**
    * Wire up the AnalyserNode to the audio element
@@ -36,11 +39,14 @@ export class AudioAnalyser {
     this._sourceNode.connect(this._analyser);
     this._analyser.connect(audioCtx.destination); // CRITICAL: or audio is silent
     this._emitTo = config.emitTo ?? null;
+    this._hudEnabled = config.hudEnabled ?? (() => false);
   }
 
   /**
    * Start the amplitude monitoring loop
-   * Captures frequency data and emits to HUD at ~60fps
+   * Captures frequency data and emits to HUD at ~60fps while the HUD is enabled.
+   * With the HUD off, each frame only checks the gate: an ungated loop sent
+   * ~55 IPC calls per second to a disabled HUD window.
    */
   start(): void {
     if (this._amplitudeLoopId !== null) return; // already running
@@ -50,7 +56,7 @@ export class AudioAnalyser {
         this._amplitudeLoopId = null;
         return;
       }
-      if (timestamp - this._lastEmitTime >= 16) {
+      if (this._hudEnabled() && timestamp - this._lastEmitTime >= 16) {
         // ~60fps for faster response
         const dataArray = new Uint8Array(this._analyser.frequencyBinCount);
         this._analyser.getByteFrequencyData(dataArray);
@@ -95,5 +101,6 @@ export class AudioAnalyser {
     this._analyser = null;
     this._sourceNode = null;
     this._emitTo = null;
+    this._hudEnabled = () => false;
   }
 }
