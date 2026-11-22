@@ -10,7 +10,8 @@ import { ICON_SVG } from "./icon";
 const CONTROL = "http://127.0.0.1:43117";
 const POLL_MS = 120;
 const IDLE_STOP_MS = 2000;
-const NO_MATCH_STOP_MS = 60000;
+// No playback this long ends a reading, whatever the status reports.
+const SILENT_STOP_MS = 60000;
 const ALIGN_WINDOW = 24;
 const RUN_NEEDED = 3;
 const EXCERPT_MIN = 1;
@@ -514,11 +515,14 @@ async function poll($: EngineInterface) {
     return;
   }
   if (s.active !== true) {
-    // A bare `{ active: false }` is also the app's answer after a silent stretch, so only
-    // the idle wait ends a reading here.
-    const quiet = run.lastActive > 0 && now - run.lastActive > IDLE_STOP_MS;
-    const neverStarted = run.lastActive === 0 && now - run.startedAt > NO_MATCH_STOP_MS;
-    if (quiet || neverStarted) await endIfCurrent($, current.id);
+    // The app sends a bare `{ active: false }` when a reading ends or stops, and after a
+    // silent stretch. While synthesis runs behind playback it sends the last position with
+    // active false: the reading goes on. So only a bare report, past the idle wait, or
+    // silence past SILENT_STOP_MS ends the reading here.
+    const silentFor = now - (run.lastActive > 0 ? run.lastActive : run.startedAt);
+    const bare = s.position_ms === undefined;
+    const idle = bare && run.lastActive > 0 && silentFor > IDLE_STOP_MS;
+    if (idle || silentFor > SILENT_STOP_MS) await endIfCurrent($, current.id);
     return;
   }
   run.lastActive = now;

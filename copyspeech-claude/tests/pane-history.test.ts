@@ -121,9 +121,65 @@ test("a bare inactive status waits out the idle wait before the reading ends", a
   await reply.unmount();
 });
 
+test("a stall while synthesis catches up keeps the reading; a bare inactive status ends it", async ($, on) => {
+  const clock = mock.clock(on);
+  on("command.register", (_, e) => ({ value: { command: e.name } }));
+  on("session.start", (_, e) => ({ cwd: e.cwd }));
+  let status: StatusReport = {
+    active: true,
+    paused: false,
+    position_ms: 350,
+    fragment_index: 0,
+    captions: {
+      text: "Hello there.",
+      words: [
+        { text_start: 0, text_end: 5, start_ms: 0, end_ms: 300 },
+        { text_start: 6, text_end: 11, start_ms: 300, end_ms: 600 }
+      ]
+    }
+  };
+  on("http.fetch", (_, e) => ({
+    value: {
+      status: 200,
+      ok: true,
+      headers: {},
+      text: e.url.endsWith("/status") ? JSON.stringify(status) : "{}"
+    }
+  }));
+  const reply = await $.ui.mount({
+    plugin: "copyspeech",
+    surface: "desktop",
+    component: "AssistantMessage",
+    requestId: "reply-1",
+    props: { text: "Hello there.", isFirstOfReply: true }
+  });
+  await $.session.start({ cwd: ".", surface: "desktop", isInteractive: true });
+  await reply.press({ key: "play-reply-1" });
+  await clock.advance(250);
+  const pane = await $.ui.mount(PANE);
+  // Synthesis behind playback: the app keeps the last position and reports active false.
+  status = { ...status, active: false };
+  await clock.advance(5000);
+  await pane.redraw();
+  expect(await pane.find({ key: "settings" })).toBeUndefined();
+  // Playback resumes.
+  status = { ...status, active: true, position_ms: 900 };
+  await clock.advance(250);
+  // The app's end: a bare report, then the idle wait.
+  status = { active: false };
+  await clock.advance(250);
+  await pane.redraw();
+  expect(await pane.find({ key: "settings" })).toBeUndefined();
+  await clock.advance(2500);
+  await pane.redraw();
+  expect(await pane.find({ key: "settings" })).toBeDefined();
+  await pane.unmount();
+  await reply.unmount();
+});
+
 test("the captions pane keeps the last reading after it stops", async ($, on) => {
   const clock = mock.clock(on);
-  const status = {
+  let status: StatusReport = {
     active: true,
     paused: false,
     position_ms: 350,
@@ -154,7 +210,7 @@ test("the captions pane keeps the last reading after it stops", async ($, on) =>
   await reply.press({ key: "play-reply-1" });
   await clock.advance(250);
   const pane = await $.ui.mount(PANE);
-  status.active = false;
+  status = { active: false };
   await clock.advance(2500);
   await pane.redraw();
   expect(await pane.find({ type: "Text", text: /Hello/ })).toBeDefined();
