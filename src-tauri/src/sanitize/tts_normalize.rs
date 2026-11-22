@@ -409,10 +409,10 @@ fn expand_symbols(text: &str) -> String {
         static ref AT_EMAIL_REGEX: Regex = Regex::new(r"([a-zA-Z0-9._%+-])@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})").unwrap();
         static ref AT_HANDLE_REGEX: Regex = Regex::new(r"@([a-zA-Z0-9_]+)").unwrap();
         // Currency symbols: $50 → 50 dollars, €20 → 20 euros, £15 → 15 pounds, ¥1000 → 1000 yen
-        static ref DOLLAR_REGEX: Regex = Regex::new(r"\$(\d+(?:\.\d+)?)\b").unwrap();
-        static ref EURO_REGEX: Regex = Regex::new(r"€(\d+(?:\.\d+)?)\b").unwrap();
-        static ref POUND_REGEX: Regex = Regex::new(r"£(\d+(?:\.\d+)?)\b").unwrap();
-        static ref YEN_REGEX: Regex = Regex::new(r"¥(\d+(?:\.\d+)?)\b").unwrap();
+        static ref DOLLAR_REGEX: Regex = Regex::new(r"\$(\d+(?:,\d{3})*(?:\.\d+)?)\b").unwrap();
+        static ref EURO_REGEX: Regex = Regex::new(r"€(\d+(?:,\d{3})*(?:\.\d+)?)\b").unwrap();
+        static ref POUND_REGEX: Regex = Regex::new(r"£(\d+(?:,\d{3})*(?:\.\d+)?)\b").unwrap();
+        static ref YEN_REGEX: Regex = Regex::new(r"¥(\d+(?:,\d{3})*(?:\.\d+)?)\b").unwrap();
     }
 
     let mut result = text.to_string();

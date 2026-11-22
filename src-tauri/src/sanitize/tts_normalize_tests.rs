@@ -265,6 +265,12 @@ fn expands_currency_symbols_and_edge_cases() {
             "50 dollars and 20 euros and 15 pounds",
         ),
         ("Convert $100 to €85", "Convert 100 dollars to 85 euros"),
+        ("$1,000", "1,000 dollars"),
+        ("$1,234,567.89", "1,234,567.89 dollars"),
+        ("€1,500", "1,500 euros"),
+        ("£10,000.50", "10,000.50 pounds"),
+        ("¥1,000,000", "1,000,000 yen"),
+        ("$50, and $1,000.", "50 dollars, and 1,000 dollars."),
         ("Price:$50", "Price:50 dollars"),
         ("Cost(€20)", "Cost(20 euros)"),
         ("$0", "0 dollars"),
@@ -275,6 +281,7 @@ fn expands_currency_symbols_and_edge_cases() {
     ] {
         assert_eq!(expand_symbols(input), expected, "{input}");
     }
+    assert_eq!(sanitize_tts("Budget: $1,000."), "Budget: 1,000 dollars.");
 }
 
 #[test]
