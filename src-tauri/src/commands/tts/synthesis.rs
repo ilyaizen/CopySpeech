@@ -368,10 +368,18 @@ mod retry_tests {
 
     #[test]
     fn transient_synthesis_error_classification() {
-        assert!(!transient_synthesis_error("HTTP 401 Unauthorized: invalid API key"));
-        assert!(!transient_synthesis_error("HTTP 403: voice model not found"));
-        assert!(!transient_synthesis_error("voice model 50300 was not found"));
-        assert!(!transient_synthesis_error("invalid transcript contains 503"));
+        assert!(!transient_synthesis_error(
+            "HTTP 401 Unauthorized: invalid API key"
+        ));
+        assert!(!transient_synthesis_error(
+            "HTTP 403: voice model not found"
+        ));
+        assert!(!transient_synthesis_error(
+            "voice model 50300 was not found"
+        ));
+        assert!(!transient_synthesis_error(
+            "invalid transcript contains 503"
+        ));
         assert!(!transient_synthesis_error(
             "edge-tts exit exit status: 1: ERROR: voice model not found"
         ));
@@ -392,7 +400,9 @@ mod retry_tests {
         assert!(transient_synthesis_error(
             "ElevenLabs API error 503 Service Unavailable: overloaded"
         ));
-        assert!(transient_synthesis_error("Request failed: error sending request"));
+        assert!(transient_synthesis_error(
+            "Request failed: error sending request"
+        ));
         assert!(transient_synthesis_error(
             "Streaming synthesis failed mid-stream: request or response body error"
         ));
@@ -560,10 +570,12 @@ fn emit_audio_stream_chunk(
 ///
 /// `on_chunk(chunk_index, pcm, is_final)` fires once per received chunk plus a
 /// terminal `(n, &[], true)` end-of-stream marker. Returns the wrapped WAV
-/// bytes and time-to-first-audio in milliseconds.
+/// bytes and time-to-first-audio in milliseconds, counted from `opened_at`
+/// (before the provider request), so it includes connection setup.
 fn drain_chunk_stream(
     stream: ChunkStream,
     scope: AbortScope,
+    opened_at: Instant,
     mut on_chunk: impl FnMut(usize, &[u8], bool, Option<&CaptionAlignment>),
 ) -> Result<(SpeechAudio, u64), String> {
     let start = Instant::now();
@@ -587,7 +599,7 @@ fn drain_chunk_stream(
         match stream.recv() {
             Some(ChunkItem::Pcm(bytes)) => {
                 if ttfa_ms.is_none() {
-                    ttfa_ms = Some(start.elapsed().as_millis() as u64);
+                    ttfa_ms = Some(opened_at.elapsed().as_millis() as u64);
                 }
                 accumulated.extend_from_slice(&bytes);
                 on_chunk(chunk_index, &bytes, false, None);
@@ -741,43 +753,48 @@ async fn synthesize_streaming_and_emit(
 
         let meta = stream.meta.clone();
         let mut pcm_bytes = 0u64;
-        drain_chunk_stream(stream, scope, |chunk_idx, pcm, is_final, captions| {
-            if scope.aborted() {
-                return;
-            }
-            pcm_bytes += pcm.len() as u64;
-            // A captions item arrives at chunk_index 0 before the first PCM
-            // chunk (ElevenLabs leads with alignment), so an empty payload is
-            // not the first chunk heard.
-            if !is_final && chunk_idx == 0 && !pcm.is_empty() {
-                log::info!(
-                    "[TTS][stream] first chunk playing after {}ms",
-                    opened_at.elapsed().as_millis()
+        drain_chunk_stream(
+            stream,
+            scope,
+            opened_at,
+            |chunk_idx, pcm, is_final, captions| {
+                if scope.aborted() {
+                    return;
+                }
+                pcm_bytes += pcm.len() as u64;
+                // A captions item arrives at chunk_index 0 before the first PCM
+                // chunk (ElevenLabs leads with alignment), so an empty payload is
+                // not the first chunk heard.
+                if !is_final && chunk_idx == 0 && !pcm.is_empty() {
+                    log::info!(
+                        "[TTS][stream] first chunk playing after {}ms",
+                        opened_at.elapsed().as_millis()
+                    );
+                }
+                // The player treats a final marker as "no more audio is coming" and
+                // arms its completion timer, so only the last fragment sends one.
+                let bytes_per_second = u64::from(meta.sample_rate)
+                    * u64::from(meta.channels)
+                    * u64::from(meta.bits_per_sample / 8);
+                let duration_ms = if is_final && bytes_per_second > 0 {
+                    Some(pcm_bytes * 1000 / bytes_per_second)
+                } else {
+                    None
+                };
+                emit_audio_stream_chunk(
+                    &worker_app,
+                    &meta,
+                    pcm,
+                    fragment_index,
+                    final_marker(is_final, emit_final),
+                    (chunk_idx == 0).then_some(text.as_str()),
+                    duration_ms,
+                    captions,
+                    session_id.as_deref(),
+                    scope.reading(),
                 );
-            }
-            // The player treats a final marker as "no more audio is coming" and
-            // arms its completion timer, so only the last fragment sends one.
-            let bytes_per_second = u64::from(meta.sample_rate)
-                * u64::from(meta.channels)
-                * u64::from(meta.bits_per_sample / 8);
-            let duration_ms = if is_final && bytes_per_second > 0 {
-                Some(pcm_bytes * 1000 / bytes_per_second)
-            } else {
-                None
-            };
-            emit_audio_stream_chunk(
-                &worker_app,
-                &meta,
-                pcm,
-                fragment_index,
-                final_marker(is_final, emit_final),
-                (chunk_idx == 0).then_some(text.as_str()),
-                duration_ms,
-                captions,
-                session_id.as_deref(),
-                scope.reading(),
-            );
-        })
+            },
+        )
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))
@@ -1852,9 +1869,9 @@ async fn synthesize_paginated(
     // matches the webview's caption against it when the caption carries no
     // fragment index.
     let mut fragment_durations_ms: Vec<u64> = Vec::new();
-    // How long the last fragment took to start producing audio. It sets the
-    // next fragment's lead, so a slow provider never opens an audible gap.
-    let mut previous_cost = Duration::ZERO;
+    // The slowest generation cost seen so far in this reading sets the next
+    // lead: provider latency is heavy-tailed, so the last cost alone underrates it.
+    let mut peak_cost = Duration::ZERO;
     for (i, fragment) in fragments.iter().enumerate() {
         // Check for abort
         if scope.aborted() {
@@ -1869,7 +1886,7 @@ async fn synthesize_paginated(
                 fragment_index: i - 1,
                 duration_ms: fragment_durations_ms[i - 1],
             };
-            let lead = super::jit::lead_after(previous_cost);
+            let lead = super::jit::lead_for(peak_cost, target, playback_speed);
             // A newer reading queued behind this one needs its fragments in
             // order, so a flush request ends the JIT wait like a stopped
             // reading would end the loop's saving.
@@ -1934,8 +1951,6 @@ async fn synthesize_paginated(
                     fragments.len()
                 ),
             }
-            // A replay has no generation cost, so the next lead uses the minimum.
-            previous_cost = Duration::ZERO;
             speech
         } else if streaming {
             let (speech, ttfa_ms) = synthesize_streaming_and_emit(
@@ -1951,7 +1966,7 @@ async fn synthesize_paginated(
             .await
             .map_err(|e| report_section_failure(app, i, fragments.len(), scope, e))?;
             // The streaming path only needs its first chunk to cover the gap.
-            previous_cost = Duration::from_millis(ttfa_ms);
+            peak_cost = peak_cost.max(Duration::from_millis(ttfa_ms));
             speech
         } else {
             let speech = synthesize_async(
@@ -1964,7 +1979,7 @@ async fn synthesize_paginated(
             .map_err(|e| report_section_failure(app, i, fragments.len(), scope, e))?;
             // The batch path has nothing to play until the whole fragment is
             // synthesized, so the next lead covers that full cost.
-            previous_cost = generation_started.elapsed();
+            peak_cost = peak_cost.max(generation_started.elapsed());
             speech
         };
 
@@ -2406,9 +2421,9 @@ async fn speak_queued_internal(
     // Rust-side duration of each submitted fragment: the JIT gate matches the
     // webview's caption against it when the caption carries no fragment index.
     let mut fragment_durations_ms: Vec<u64> = Vec::new();
-    // How long the last fragment took to start producing audio. It sets the
-    // next fragment's lead, so a slow provider never opens an audible gap.
-    let mut previous_cost = Duration::ZERO;
+    // The slowest generation cost seen so far in this reading sets the next
+    // lead: provider latency is heavy-tailed, so the last cost alone underrates it.
+    let mut peak_cost = Duration::ZERO;
     for (index, fragment) in fragments.iter().enumerate() {
         // Check if we should stop
         {
@@ -2434,7 +2449,7 @@ async fn speak_queued_internal(
                 fragment_index: index - 1,
                 duration_ms: fragment_durations_ms[index - 1],
             };
-            let lead = super::jit::lead_after(previous_cost);
+            let lead = super::jit::lead_for(peak_cost, target, playback_speed);
             if !wait_for_jit_window(scope, target, lead, playback_speed, || {
                 super::queued_gate::flush_requested()
             })
@@ -2501,8 +2516,6 @@ async fn speak_queued_internal(
                 playback_speed,
             );
         let wav_bytes = if let Some(speech) = saved.as_mut().and_then(Iterator::next) {
-            // A replay has no generation cost, so the next lead uses the minimum.
-            previous_cost = Duration::ZERO;
             speech
         } else if streamed {
             let (speech, ttfa_ms) = synthesize_streaming_and_emit(
@@ -2518,7 +2531,7 @@ async fn speak_queued_internal(
             .await
             .map_err(|e| report_section_failure(&app, index, total, scope, e))?;
             // The streaming path only needs its first chunk to cover the gap.
-            previous_cost = Duration::from_millis(ttfa_ms);
+            peak_cost = peak_cost.max(Duration::from_millis(ttfa_ms));
             speech
         } else {
             let speech = synthesize_async(
@@ -2531,7 +2544,7 @@ async fn speak_queued_internal(
             .map_err(|e| report_section_failure(&app, index, total, scope, e))?;
             // The batch path has nothing to play until the whole fragment
             // exists, so the next lead covers that full cost.
-            previous_cost = fragment_start.elapsed();
+            peak_cost = peak_cost.max(fragment_start.elapsed());
             speech
         };
         let fragment_duration = fragment_start.elapsed();
@@ -2819,11 +2832,15 @@ mod streaming_tests {
         );
 
         let mut seen: Vec<(usize, Vec<u8>, bool)> = Vec::new();
-        let (wav, _ttfa) =
-            drain_chunk_stream(stream, AbortScope::begin(), |idx, pcm, is_final, _| {
+        let (wav, _ttfa) = drain_chunk_stream(
+            stream,
+            AbortScope::begin(),
+            Instant::now(),
+            |idx, pcm, is_final, _| {
                 seen.push((idx, pcm.to_vec(), is_final));
-            })
-            .expect("healthy stream drains");
+            },
+        )
+        .expect("healthy stream drains");
 
         assert_eq!(seen.len(), 3);
         assert_eq!(seen[0], (0, a.clone(), false));
@@ -2841,11 +2858,16 @@ mod streaming_tests {
 
         let single = stream_from_items(vec![ChunkItem::Pcm(vec![9, 9, 9])], 8000);
         let mut finals = 0;
-        let (wav, _) = drain_chunk_stream(single, AbortScope::begin(), |_, _, is_final, _| {
-            if is_final {
-                finals += 1;
-            }
-        })
+        let (wav, _) = drain_chunk_stream(
+            single,
+            AbortScope::begin(),
+            Instant::now(),
+            |_, _, is_final, _| {
+                if is_final {
+                    finals += 1;
+                }
+            },
+        )
         .unwrap();
         assert_eq!(finals, 1);
         assert_eq!(wav.bytes.len(), 44 + 3);
@@ -2862,8 +2884,22 @@ mod streaming_tests {
         assert!(!effects_active(false, true));
         assert!(!effects_active(true, false));
 
-        assert!(allows_streaming_playback(true, true, true, false, &EffectId::None, 1.0));
-        assert!(allows_streaming_playback(true, true, true, true, &EffectId::WalkieTalkie, 1.0));
+        assert!(allows_streaming_playback(
+            true,
+            true,
+            true,
+            false,
+            &EffectId::None,
+            1.0
+        ));
+        assert!(allows_streaming_playback(
+            true,
+            true,
+            true,
+            true,
+            &EffectId::WalkieTalkie,
+            1.0
+        ));
         assert!(allows_streaming_playback(
             true,
             true,
@@ -2883,7 +2919,9 @@ mod streaming_tests {
             (true, true, true, false, EffectId::None, 0.75),
             (true, true, true, true, EffectId::WalkieTalkie, 1.4),
         ] {
-            assert!(!allows_streaming_playback(enabled, supports, ready, fx, &effect, speed));
+            assert!(!allows_streaming_playback(
+                enabled, supports, ready, fx, &effect, speed
+            ));
         }
     }
 
@@ -2918,6 +2956,7 @@ mod streaming_tests {
             let (speech, _) = drain_chunk_stream(
                 stream,
                 AbortScope::begin(),
+                Instant::now(),
                 |idx, pcm, is_final, captions| {
                     seen.push((idx, pcm.to_vec(), is_final, captions.cloned()));
                 },
@@ -2945,7 +2984,7 @@ mod streaming_tests {
             8000,
         );
         assert_eq!(
-            drain_chunk_stream(next, AbortScope::begin(), |_, _, _, _| {})
+            drain_chunk_stream(next, AbortScope::begin(), Instant::now(), |_, _, _, _| {})
                 .unwrap()
                 .0
                 .captions,
@@ -2962,11 +3001,15 @@ mod streaming_tests {
             ],
             16000,
         );
-        let err = drain_chunk_stream(failed, AbortScope::begin(), |_, _, _, _| {}).unwrap_err();
+        let err = drain_chunk_stream(failed, AbortScope::begin(), Instant::now(), |_, _, _, _| {})
+            .unwrap_err();
         assert!(err.contains("connection reset"));
 
         let empty = stream_from_items(Vec::new(), 22050);
-        assert!(drain_chunk_stream(empty, AbortScope::begin(), |_, _, _, _| {}).is_err());
+        assert!(
+            drain_chunk_stream(empty, AbortScope::begin(), Instant::now(), |_, _, _, _| {})
+                .is_err()
+        );
     }
 
     /// The JIT gate reads the fragment duration off the WAV header, never by

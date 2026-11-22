@@ -4,7 +4,9 @@
 //! fragment up front pays for audio a stopped reading never plays. This module
 //! decides when the next fragment must be submitted: early enough that its
 //! first audio lands inside the current fragment's tail, late enough that an
-//! early stop pays for as little as possible.
+//! early stop pays for as little as possible. Submitting earlier inside the
+//! current fragment costs nothing extra unless the reading stops after that
+//! point, so the lead never drops below half the current fragment.
 //!
 //! The decision is a pure function of the webview's reported playback progress
 //! and the Rust-side fragment duration, so it is unit tested without a webview
@@ -16,12 +18,13 @@ use std::time::{Duration, Instant};
 /// Smallest head start: the next fragment starts submitting this long before
 /// the current fragment ends, so its first audio lands before the tail runs out.
 pub(crate) const MIN_LEAD: Duration = Duration::from_secs(3);
-/// Room on top of the previous fragment's measured generation cost. The next
-/// fragment can be slower than the last one (a longer fragment, provider
-/// jitter), and a late batch fragment would leave an audible gap.
-pub(crate) const LEAD_MARGIN: Duration = Duration::from_millis(1_200);
-/// Cap on the adaptive lead. A larger head start only wastes credits.
-pub(crate) const MAX_LEAD: Duration = Duration::from_secs(12);
+/// Factor on the reading's peak generation cost. Cloud latency is heavy-tailed
+/// (a 4 s fragment can take 20 s), and a late fragment leaves an audible gap.
+const COST_FACTOR: f64 = 1.5;
+/// Fixed room on top of the scaled cost.
+pub(crate) const LEAD_MARGIN: Duration = Duration::from_millis(1_500);
+/// Cap on the cost-based lead. The half-fragment floor can exceed it.
+pub(crate) const MAX_LEAD: Duration = Duration::from_secs(30);
 /// No fresh caption for this long means the webview's clock died; submit the
 /// next fragment anyway, exactly as the free-running loop did.
 pub(crate) const NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,13 +58,29 @@ impl JitDecision {
     }
 }
 
-/// The lead to use before submitting the next fragment: the previous
-/// fragment's measured generation cost (first chunk for the streaming path,
-/// whole synthesis for the batch path) plus a margin, never below [`MIN_LEAD`].
-/// The result is wall-clock time; [`JitWaiter`] converts it to the media time
-/// the webview reports.
-pub(crate) fn lead_after(generation_cost: Duration) -> Duration {
-    (generation_cost + LEAD_MARGIN).clamp(MIN_LEAD, MAX_LEAD)
+/// The cost-based lead: the reading's peak generation cost (first chunk for
+/// the streaming path, whole synthesis for the batch path) scaled by
+/// [`COST_FACTOR`] plus [`LEAD_MARGIN`], kept inside [`MIN_LEAD`]..[`MAX_LEAD`].
+fn lead_after(peak_cost: Duration) -> Duration {
+    (peak_cost.mul_f64(COST_FACTOR) + LEAD_MARGIN).clamp(MIN_LEAD, MAX_LEAD)
+}
+
+/// The lead to use before submitting the fragment after `target`: the
+/// cost-based lead, raised to half of `target`'s wall-clock playback. The
+/// result is wall-clock time; [`JitWaiter`] converts it to the media time the
+/// webview reports.
+pub(crate) fn lead_for(peak_cost: Duration, target: JitTarget, playback_speed: f32) -> Duration {
+    let wall_ms = target.duration_ms as f64 / media_rate(playback_speed);
+    lead_after(peak_cost).max(Duration::from_secs_f64(wall_ms / 1000.0 / 2.0))
+}
+
+/// How fast media time advances per wall second; an invalid speed plays at 1x.
+fn media_rate(playback_speed: f32) -> f64 {
+    if playback_speed.is_finite() && playback_speed > 0.0 {
+        f64::from(playback_speed)
+    } else {
+        1.0
+    }
 }
 
 /// One wait for the playback of a specific fragment to approach its end.
@@ -88,15 +107,10 @@ impl JitWaiter {
         playback_speed: f32,
         now: Instant,
     ) -> Self {
-        let speed = if playback_speed.is_finite() && playback_speed > 0.0 {
-            f64::from(playback_speed)
-        } else {
-            1.0
-        };
         Self {
             target,
             lead,
-            speed,
+            speed: media_rate(playback_speed),
             started_at: now,
             anchor: None,
             last_position_ms: None,
@@ -225,7 +239,10 @@ mod tests {
         let start = Instant::now();
         let mut w = waiter(start);
         assert_eq!(
-            w.observe(Some(progress(Some(1), 5_000)), start + Duration::from_secs(5)),
+            w.observe(
+                Some(progress(Some(1), 5_000)),
+                start + Duration::from_secs(5)
+            ),
             JitDecision::Wait
         );
         assert_eq!(
@@ -406,17 +423,39 @@ mod tests {
         assert_eq!(waiter.observe(Some(other), now), JitDecision::Wait);
     }
 
-    /// The lead grows with the previous fragment's measured cost but stays
-    /// inside its bounds.
+    /// The lead grows with the peak cost but stays inside its bounds.
     #[test]
     fn the_lead_tracks_the_generation_cost() {
         assert_eq!(lead_after(Duration::ZERO), MIN_LEAD);
         // A cost below the floor keeps the floor.
-        assert_eq!(lead_after(Duration::from_millis(1_500)), MIN_LEAD);
+        assert_eq!(lead_after(Duration::from_millis(500)), MIN_LEAD);
         assert_eq!(
             lead_after(Duration::from_millis(4_000)),
-            Duration::from_millis(5_200)
+            Duration::from_millis(7_500)
         );
         assert_eq!(lead_after(Duration::from_secs(30)), MAX_LEAD);
+    }
+
+    /// A long fragment submits the next one by its halfway point, scaled by
+    /// playback rate; an unknown duration falls back to the cost-based lead.
+    #[test]
+    fn the_lead_never_drops_below_half_the_fragment() {
+        let cheap = Duration::from_millis(500);
+        assert_eq!(lead_for(cheap, target(), 1.0), Duration::from_secs(15));
+        assert_eq!(lead_for(cheap, target(), 1.5), Duration::from_secs(10));
+        let unknown = JitTarget {
+            fragment_index: 1,
+            duration_ms: 0,
+        };
+        assert_eq!(lead_for(cheap, unknown, 1.0), MIN_LEAD);
+        // A slow provider outgrows a short fragment's floor.
+        let short = JitTarget {
+            fragment_index: 1,
+            duration_ms: 8_000,
+        };
+        assert_eq!(
+            lead_for(Duration::from_secs(10), short, 1.0),
+            Duration::from_millis(16_500)
+        );
     }
 }

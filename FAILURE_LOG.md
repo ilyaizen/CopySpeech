@@ -147,6 +147,8 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 - Route post-process LLM output through `sanitize_text_tag_safe`, never the plain pipeline. `remove_citations` deletes `[sighs]`.
 - JIT-gate every paginated path (`synthesize_paginated`, `speak_queued_internal`): submit fragment 0 at once, then each later fragment inside the previous fragment's lead window. A fully cached queued reading skips the gate.
 - Serialize queued readings with a flush + barrier (`commands/tts/queued_gate.rs`). The webview's `FragmentQueue` plays in ENQUEUE order and has no reading id, so a second reading would interleave. A waiting reading asks the holder to flush its rest, then takes the turn.
+- Measure streaming TTFA from before `synthesize_streaming` opens (`drain_chunk_stream`'s `opened_at`); timing from drain start drops connection setup and logged 1–3 ms for a 130 ms Cartesia first chunk.
+- Feed the JIT lead the reading's peak cost, not the last one: Cartesia batch fragments cost 3–5 s with 17–28 s outliers, and a single-sample lead left 12–16 s gaps.
 - Check the abort scope on every JIT gate poll and wake its 120 ms sleep on a scoped stop (`until_cancelled`). A stopped reading must never submit the next fragment.
 - Flipping a `MarkdownSanitizationConfig` default fails every test built with `..Default::default()` that asserts the old behavior. Grep those tests and pin the field explicitly.
 
