@@ -17,6 +17,8 @@ declare module "claude-code" {
       history: { row: string; md: string }[];
       /** Whether the captions pane's settings are expanded. */
       settingsOpen: boolean;
+      /** Settings the engine took, shown until the plugin reloads with them. Keyed by setting name. */
+      settingOverrides: Record<string, boolean | number | string>;
     };
   }
 }

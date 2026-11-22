@@ -7,7 +7,7 @@ const PANE = {
   component: "Pane",
   requestId: "captions",
   props: {
-    title: "CopySpeech companion",
+    title: "CopySpeech Reader",
     isFocused: false,
     bodyColumns: 60,
     placement: "dock",
@@ -65,13 +65,10 @@ test(
     await clock.advance(1);
     await pane.press({ key: "captions" });
     await clock.advance(1);
-    await pane.press({ key: "excerptTop-up" });
-    await clock.advance(1);
     await pane.press({ key: "excerptMode" });
     await clock.advance(1);
     expect(writes).toEqual([
       ["copyspeech@inline.captions", false],
-      ["copyspeech@inline.excerptTop", 3],
       ["copyspeech@inline.excerptMode", "top"]
     ]);
     await pane.unmount();
@@ -86,5 +83,65 @@ test("/copyspeech-settings opens the captions pane", async ($, on) => {
   });
   const result = await $.command.run(RUN);
   expect(opened).toEqual(["captions"]);
-  expect(result.text).toBe("CopySpeech settings are in the companion pane.");
+  expect(result.text).toBe("CopySpeech settings are in the Reader pane.");
 });
+
+test(
+  "a setting the list does not return writes under its /config key",
+  { options: OPTIONS },
+  async ($, on) => {
+    const clock = mock.clock(on);
+    const keys: string[] = [];
+    on("config.list", () => ({ value: [] }));
+    on("config.set", (_, e) => {
+      keys.push(e.key);
+      return { value: e.value };
+    });
+    const pane = await $.ui.mount(PANE);
+    await pane.press({ key: "settings" });
+    await clock.advance(1);
+    await pane.press({ key: "captions" });
+    await clock.advance(1);
+    expect(keys).toEqual(["copyspeech@inline.captions"]);
+    await pane.unmount();
+  }
+);
+
+test(
+  "a refused key falls back to the plugin's other /config name",
+  { options: OPTIONS },
+  async ($, on) => {
+    const clock = mock.clock(on);
+    const keys: string[] = [];
+    on("config.list", () => ({ value: [] }));
+    on("config.set", (_, e) => {
+      keys.push(e.key);
+      return e.key === "copyspeech.captions" ? { value: e.value } : { deny: "no such row" };
+    });
+    const pane = await $.ui.mount(PANE);
+    await pane.press({ key: "settings" });
+    await clock.advance(1);
+    await pane.press({ key: "captions" });
+    await clock.advance(1);
+    expect(keys).toEqual(["copyspeech@inline.captions", "copyspeech.captions"]);
+    await pane.unmount();
+  }
+);
+
+test(
+  "a toggle shows the value the engine took, before any reload",
+  { options: OPTIONS },
+  async ($, on) => {
+    const clock = mock.clock(on);
+    on("config.list", () => ({ value: [] }));
+    on("config.set", (_, e) => ({ value: e.value }));
+    const pane = await $.ui.mount(PANE);
+    await pane.press({ key: "settings" });
+    await clock.advance(1);
+    await pane.press({ key: "captions" });
+    await clock.advance(1);
+    await pane.redraw();
+    expect((await pane.find({ key: "captions" }))?.props.label).toBe("Show captions: Off");
+    await pane.unmount();
+  }
+);

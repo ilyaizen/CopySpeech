@@ -4,6 +4,7 @@ import {
   align,
   captionWords,
   pickParagraphs,
+  prepareLine,
   prepareSpeech,
   speakable,
   wordTokens
@@ -22,6 +23,16 @@ test("skip drops headings, items, rules, and table rows but keeps text under a h
   const md = "## Answer\nYes it works.\n\n- one\n1. two\n---\n| a | b |\nDone.";
   expect(prepareSpeech([{ row: "r", md }], true, null).speech).toBe("Yes it works.\n\nDone.");
   expect(prepareSpeech([{ row: "r", md: "- one\n- two" }], false, null).speech).toBe("one\ntwo");
+});
+
+test("prepareLine speaks one list item from its own range, with the reply's offsets", async () => {
+  const md = "Pick one:\n\n- first item here\n- second item here";
+  const phrase = "second item here";
+  const from = md.indexOf(phrase);
+  const spoken = prepareLine("r", md, from, from + phrase.length);
+  expect(spoken.speech).toBe(phrase);
+  expect(spoken.tokens.map((t) => md.slice(t.start, t.end))).toEqual(["second", "item", "here"]);
+  expect(spoken.tokens.every((t) => t.row === "r")).toBe(true);
 });
 
 const MD = "The **quick** fox. Run `npm test` then [read docs](https://x.y/z) now.";

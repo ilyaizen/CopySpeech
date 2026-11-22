@@ -29,7 +29,7 @@ Start CopySpeech yourself before using the extension. If `COPYSPEECH_PI_LAUNCH=1
 
 ## Claude Code hook
 
-The repo-local Claude hook is configured in `.claude/settings.json`; `.claude/settings.example.json` contains the same copyable config:
+Add the hook to `.claude/settings.json` or `.claude/settings.local.json` in your checkout:
 
 ```json
 {
@@ -50,7 +50,7 @@ The repo-local Claude hook is configured in `.claude/settings.json`; `.claude/se
 }
 ```
 
-`.claude/` is gitignored in this repo, so these settings are local-only unless force-added or moved to a tracked docs path.
+`.claude/` is gitignored in this repo, so the repo ships no hook settings. This block is the only copy.
 
 ## DSH plugin
 
@@ -95,7 +95,7 @@ The plugin finds the settled message through the Chat row's `data-chat-node-key`
 - `COPYSPEECH_PI_EFFECT=walkie_talkie` / `COPYSPEECH_CLAUDE_EFFECT=...` overrides the running app effect.
 - `COPYSPEECH_PI_ASSISTANT=0` disables final assistant-message speech in Pi.
 - `COPYSPEECH_PI_ACTIVITY=1` enables thinking/tool announcements in Pi.
-- `COPYSPEECH_PI_THINKING=0` disables spoken thinking blocks in Pi.
+- `COPYSPEECH_PI_THINKING=1` enables spoken thinking blocks in Pi. They are off by default.
 - `COPYSPEECH_PI_MAX_CHARS=700` / `COPYSPEECH_CLAUDE_MAX_CHARS=700` limits final response speech length.
 - `COPYSPEECH_PI_LAUNCH=1` / `COPYSPEECH_CLAUDE_LAUNCH=1` enables auto-launching CopySpeech.
 - `COPYSPEECH_CONTROL_URL=http://127.0.0.1:43117/speak` overrides the local control endpoint.

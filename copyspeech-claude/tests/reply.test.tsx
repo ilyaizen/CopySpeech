@@ -24,7 +24,7 @@ const PANE = {
   component: "Pane",
   requestId: "captions",
   props: {
-    title: "CopySpeech companion",
+    title: "CopySpeech Reader",
     isFocused: false,
     bodyColumns: 60,
     placement: "dock",
@@ -33,7 +33,7 @@ const PANE = {
   }
 } as const;
 
-test("desktop reply draws the CopySpeech mark inside the button, in room the label leaves", async ($) => {
+test("desktop reply's play button is the plain word Read, with no icon", async ($) => {
   const ui = await $.ui.mount({
     plugin: "copyspeech",
     surface: "desktop",
@@ -42,8 +42,8 @@ test("desktop reply draws the CopySpeech mark inside the button, in room the lab
     props: REPLY
   });
 
-  expect(await ui.find({ type: "Svg" })).toBeDefined();
-  expect(await ui.find({ key: "play-reply-1", text: /^  Read excerpt$/ })).toBeDefined();
+  expect(await ui.find({ type: "Svg" })).toBeUndefined();
+  expect(await ui.find({ key: "play-reply-1", text: "Read" })).toBeDefined();
   await ui.unmount();
 });
 
@@ -57,7 +57,7 @@ test("terminal reply has no Svg and labels the button with a ▶", async ($) => 
   });
 
   expect(await ui.find({ type: "Svg" })).toBeUndefined();
-  expect(await ui.find({ key: "play-reply-1", text: "▶ Read excerpt" })).toBeDefined();
+  expect(await ui.find({ key: "play-reply-1", text: "▶ Read" })).toBeDefined();
   await ui.unmount();
 });
 
@@ -103,7 +103,7 @@ test("a playing reply shows Pause and Stop in the band; Pause posts /pause, Stop
 });
 
 test(
-  "with both trims off, the play button reads the whole reply and says Read aloud",
+  "the play button on a reply says Read, with or without trims",
   { options: { skipSections: false, excerpt: false } },
   async ($) => {
     const ui = await $.ui.mount({
@@ -113,7 +113,7 @@ test(
       requestId: "reply-1",
       props: REPLY
     });
-    expect(await ui.find({ key: "play-reply-1", text: "▶ Read aloud" })).toBeDefined();
+    expect(await ui.find({ key: "play-reply-1", text: "▶ Read" })).toBeDefined();
     await ui.unmount();
   }
 );
@@ -235,6 +235,65 @@ test("a reply's blocks without the spoken word draw as the engine's Markdown; th
   expect(word?.props).toEqual({ backgroundColor: "text", color: "inverseText" });
   await pane.unmount();
   await reply.unmount();
+});
+
+test("the pane's header row shows Read when idle, then Pause and Stop while a reading plays, and Settings stays", async ($, on) => {
+  const clock = mock.clock(on);
+  const urls: string[] = [];
+  on("http.fetch", (_, e) => {
+    urls.push(e.url);
+    return { value: { status: 200, ok: true, headers: {}, text: "{}" } };
+  });
+  const ui = await $.ui.mount({
+    plugin: "copyspeech",
+    surface: "desktop",
+    component: "AssistantMessage",
+    requestId: "reply-1",
+    props: REPLY
+  });
+  const pane = await $.ui.mount(PANE);
+  // The header comes first: the colored mark and the name, then the playbox and Settings.
+  expect(await pane.find({ type: "Text", text: "CopySpeech" })).toBeDefined();
+  expect(await pane.find({ key: "pane-read" })).toBeDefined();
+  expect(await pane.find({ key: "pane-pause" })).toBeUndefined();
+  expect(await pane.find({ key: "settings" })).toBeDefined();
+
+  await ui.press({ key: "play-reply-1" });
+  await clock.settle();
+  await pane.redraw();
+  expect(await pane.find({ key: "pane-read" })).toBeUndefined();
+  expect(await pane.find({ type: "Text", text: "CopySpeech Reading" })).toBeDefined();
+  expect(await pane.find({ key: "pane-pause" })).toBeDefined();
+  expect(await pane.find({ key: "pane-stop" })).toBeDefined();
+  expect(await pane.find({ key: "settings" })).toBeDefined();
+
+  await pane.press({ key: "pane-pause" });
+  await clock.settle();
+  expect(urls.some((u) => u.endsWith("/pause"))).toBe(true);
+  await pane.unmount();
+  await ui.unmount();
+});
+
+test("the header Read speaks the latest turn's replies when nothing plays", async ($, on) => {
+  const clock = mock.clock(on);
+  const bodies: string[] = [];
+  on("http.fetch", (_, e) => {
+    if (e.url.endsWith("/speak")) bodies.push(JSON.stringify(e.init?.body ?? ""));
+    return { value: { status: 200, ok: true, headers: {}, text: "{}" } };
+  });
+  const ui = await $.ui.mount({
+    plugin: "copyspeech",
+    surface: "desktop",
+    component: "AssistantMessage",
+    requestId: "reply-1",
+    props: REPLY
+  });
+  const pane = await $.ui.mount(PANE);
+  await pane.press({ key: "pane-read" });
+  await clock.settle();
+  expect(bodies.some((b) => b.includes("Hello there"))).toBe(true);
+  await pane.unmount();
+  await ui.unmount();
 });
 
 test("Pause stays in the band while the spoken word moves in the pane", async ($, on) => {
