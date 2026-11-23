@@ -1,5 +1,5 @@
 <script lang="ts">
-  // One engine row. Voice and model settings stay in Profiles.
+  // One engine block. Voice and model settings stay in Profiles.
 
   import { _ } from "svelte-i18n";
   import { Download, Loader2, ExternalLink, Eye, EyeOff } from "@lucide/svelte";
@@ -41,7 +41,7 @@
     onInstall?: () => void;
     onCredentialChange?: () => void;
     testDisabled?: boolean;
-    /** Local engines: probe result from the table. `null` while it loads. */
+    /** Local engines: probe result from the list. `null` while it loads. */
     runtime?: RuntimeStatus | null;
     runtimeError?: boolean;
     /** engine → winning env var for keys currently provided by .env. */
@@ -104,7 +104,7 @@
   const statusPositive = $derived(
     testState === "success" || (entry.kind === "local" ? runtime?.installed === true : configured)
   );
-  // One status dot per row. Emerald reads as ready, red as failed, muted as
+  // One status dot per block. Emerald reads as ready, red as failed, muted as
   // pending or needs-attention; the full text lives in the info tooltip.
   const statusDotTone = $derived(
     testState === "fail"
@@ -126,26 +126,23 @@
 </script>
 
 <Tooltip.Provider delayDuration={100}>
-  <tr class="border-border border-t">
-    <th
-      role="rowheader"
-      scope="row"
-      class="px-3 py-2.5 text-start align-top font-normal break-words"
-    >
+  <li class="border-border border-b px-4 py-3 last:border-b-0">
+    <div class="space-y-2.5">
       <div class="flex items-center gap-2">
         <span class="font-medium">{entry.menuLabel ?? $_(`engine.${entry.id}.title`)}</span>
-        <InfoTooltip text={$_(`engine.${entry.id}.description`)} detail={statusDetail} />
         <span
           role="status"
           aria-label={statusLabel}
           class="size-2 shrink-0 rounded-full {statusDotTone} {statusBusy ? 'animate-pulse' : ''}"
         ></span>
+        <InfoTooltip text={$_(`engine.${entry.id}.description`)} detail={statusDetail} />
       </div>
-    </th>
 
-    <td role="cell" class="px-3 py-2.5 align-top">
       {#if models.length > 0}
         <div class="flex flex-wrap items-center gap-1">
+          <span class="text-muted-foreground me-1.5 text-xs">
+            {$_("engines.dashboard.availableModels")}
+          </span>
           {#each visibleModels as model (model.id)}
             <Tooltip.Root>
               <Tooltip.Trigger
@@ -172,9 +169,7 @@
           {/if}
         </div>
       {/if}
-    </td>
 
-    <td role="cell" class="px-3 py-2.5 align-top">
       <div class="flex flex-wrap items-center gap-1.5">
         {#if entry.credentialTarget && credentialFields}
           <div class="relative min-w-0 flex-1 basis-52">
@@ -247,8 +242,9 @@
           </Button>
         </div>
       </div>
+
       {#if envVarName}
-        <p class="text-muted-foreground mt-1.5 text-xs break-all">
+        <p class="text-muted-foreground text-xs break-all">
           {envVarName} <span class="font-mono">(.env)</span>
         </p>
       {/if}
@@ -258,7 +254,7 @@
           type="url"
           disabled={testDisabled}
           aria-label={`${$_(`engine.${entry.id}.title`)} ${$_("engine.apiSetup.endpointLabel")}`}
-          class="mt-1.5 h-8 text-sm"
+          class="h-8 text-sm"
           placeholder={$_("engine.apiSetup.endpointPlaceholder")}
           value={credentialFields.endpoint ?? ""}
           oninput={(e) => {
@@ -268,10 +264,10 @@
         />
       {/if}
       {#if testState === "fail" && testMessage}
-        <p class="text-destructive mt-2 text-xs [overflow-wrap:anywhere] whitespace-pre-wrap">
+        <p class="text-destructive text-xs [overflow-wrap:anywhere] whitespace-pre-wrap">
           {testMessage}
         </p>
       {/if}
-    </td>
-  </tr>
+    </div>
+  </li>
 </Tooltip.Provider>

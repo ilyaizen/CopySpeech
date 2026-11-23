@@ -46,7 +46,7 @@ describe("engine configuration dashboard", () => {
       envKeySources: { fish: "FISH_API_KEY" }
     });
 
-    expect(view.getAllByRole("row")).toHaveLength(ALL_SETUP_ENTRIES.length + 1);
+    expect(view.getAllByRole("listitem")).toHaveLength(ALL_SETUP_ENTRIES.length);
     const input = view.getByLabelText("OpenAI API Key");
     if (!(input instanceof HTMLInputElement)) throw new Error("Expected an API key input");
     expect(input.type).toBe("password");
@@ -62,9 +62,9 @@ describe("engine configuration dashboard", () => {
     ).toBe(true);
 
     await fireEvent.click(view.getByRole("button", { name: "Local" }));
-    expect(view.getAllByRole("row")).toHaveLength(LOCAL_ENGINES.length + 1);
+    expect(view.getAllByRole("listitem")).toHaveLength(LOCAL_ENGINES.length);
     await fireEvent.click(view.getByRole("button", { name: "Cloud" }));
-    expect(view.getAllByRole("row")).toHaveLength(CLOUD_ENGINES.length + 1);
+    expect(view.getAllByRole("listitem")).toHaveLength(CLOUD_ENGINES.length);
     expect(
       invokeMock.mock.calls.every(
         ([cmd, args]) =>

@@ -169,7 +169,7 @@
 
   <UvNotice />
 
-  <div class="engine-table-wrapper settings-card bg-card rounded-lg border">
+  <div class="settings-card bg-card rounded-lg border">
     <div
       class="inline-flex flex-wrap gap-1 pb-3"
       role="group"
@@ -192,43 +192,23 @@
         </Button>
       {/each}
     </div>
-    <div class="border-border rounded-md border">
-      <table
-        aria-label={$_("engines.dashboard.title")}
-        class="engine-table w-full table-fixed border-collapse text-start text-sm"
-      >
-        <thead class="bg-muted/40 text-muted-foreground text-xs">
-          <tr>
-            <th scope="col" class="w-[22%] px-3 py-2.5 text-start font-medium"
-              >{$_("engines.dashboard.engine")}</th
-            >
-            <th scope="col" class="w-[30%] px-3 py-2.5 text-start font-medium"
-              >{$_("engines.dashboard.models")}</th
-            >
-            <th scope="col" class="px-3 py-2.5 text-start font-medium"
-              >{$_("engines.dashboard.configuration")}</th
-            >
-          </tr>
-        </thead>
-        <tbody>
-          {#each visibleEntries as entry (entry.id)}
-            <EnginePanel
-              bind:localConfig
-              {entry}
-              testState={testState(entry.id)}
-              testMessage={testMessages[entry.id] ?? ""}
-              testDisabled={testing || installing || installDialogEntry !== null}
-              onTest={() => runTest(entry)}
-              onInstall={() => runInstall(entry)}
-              onCredentialChange={() => clearTest(entry.id)}
-              runtime={runtimeStatuses[entry.id] ?? null}
-              runtimeError={runtimeErrors[entry.id] ?? false}
-              {envKeySources}
-            />
-          {/each}
-        </tbody>
-      </table>
-    </div>
+    <ul class="border-border rounded-md border" aria-label={$_("engines.dashboard.title")}>
+      {#each visibleEntries as entry (entry.id)}
+        <EnginePanel
+          bind:localConfig
+          {entry}
+          testState={testState(entry.id)}
+          testMessage={testMessages[entry.id] ?? ""}
+          testDisabled={testing || installing || installDialogEntry !== null}
+          onTest={() => runTest(entry)}
+          onInstall={() => runInstall(entry)}
+          onCredentialChange={() => clearTest(entry.id)}
+          runtime={runtimeStatuses[entry.id] ?? null}
+          runtimeError={runtimeErrors[entry.id] ?? false}
+          {envKeySources}
+        />
+      {/each}
+    </ul>
   </div>
 
   {#if installDialogEntry}
@@ -244,42 +224,3 @@
     />
   {/if}
 </section>
-
-<style>
-  .engine-table-wrapper {
-    container-type: inline-size;
-  }
-
-  @container (max-width: 41.999rem) {
-    .engine-table,
-    .engine-table :global(tbody) {
-      display: block;
-    }
-
-    .engine-table thead {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip-path: inset(50%);
-    }
-
-    .engine-table :global(tbody tr) {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
-      gap: 0.75rem;
-      padding: 1rem;
-    }
-
-    .engine-table :global(tbody tr:first-child) {
-      border-top: 0;
-    }
-
-    .engine-table :global(tbody th),
-    .engine-table :global(tbody td) {
-      min-width: 0;
-      padding: 0;
-      text-align: start;
-    }
-  }
-</style>
