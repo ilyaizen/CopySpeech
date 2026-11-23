@@ -552,14 +552,12 @@
   "engines": {
     "dashboard": {
       "title": "Configuración de motores",
-      "description": "Configura claves API, gestiona instalaciones locales y prueba cada motor.",
+      "description": "Configura claves API, gestiona instalaciones locales y prueba cada motor. Elige voces y modelos en Perfiles.",
       "filter": "Filtrar motores",
-      "all": "Todos los motores",
-      "profileHint": "Elige voces y modelos en Perfiles.",
+      "all": "Todas",
       "engine": "Motor",
-      "configuration": "Clave API / instalación",
-      "status": "Estado",
-      "actions": "Acciones",
+      "models": "Modelos",
+      "configuration": "Configuración",
       "hideKey": "Ocultar clave API",
       "showKey": "Mostrar clave API",
       "installing": "Instalación en curso",

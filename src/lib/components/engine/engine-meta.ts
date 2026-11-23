@@ -20,6 +20,13 @@ export type CredentialTarget =
 // Panel state machines shared between engine-setup (orchestrator) and engine-panel (view).
 export type TestState = "idle" | "testing" | "success" | "fail";
 
+/** Result of the `engine_runtime_status` command for a local engine. */
+export interface RuntimeStatus {
+  installed: boolean;
+  /** "cpu", "cuda", or null when the last run has no provider line. */
+  provider: string | null;
+}
+
 /**
  * How the install dialog presents voices for an installable engine:
  * - `per-voice`: each voice is a separate model download (piper)

@@ -92,11 +92,13 @@ describe("engine configuration dashboard", () => {
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("test_tts_engine_config", { engine: "openai" })
     );
-    await waitFor(() => expect(view.getByText("Engine Test Passed")).toBeTruthy());
+    await waitFor(() =>
+      expect(view.getByRole("status", { name: "Engine Test Passed" })).toBeTruthy()
+    );
     await fireEvent.input(view.getByLabelText("OpenAI API Key"), {
       target: { value: "replacement" }
     });
-    expect(view.queryByText("Engine Test Passed")).toBeNull();
+    expect(view.queryByRole("status", { name: "Engine Test Passed" })).toBeNull();
   });
 
   it("does not test when saving fails or awaits an environment warning", async () => {
@@ -119,9 +121,11 @@ describe("engine configuration dashboard", () => {
       onSave: vi.fn()
     });
     await waitFor(() =>
-      expect(view.getAllByText("Status unavailable")).toHaveLength(LOCAL_ENGINES.length)
+      expect(view.getAllByRole("status", { name: "Status unavailable" })).toHaveLength(
+        LOCAL_ENGINES.length
+      )
     );
-    expect(view.queryByText("Not installed")).toBeNull();
+    expect(view.queryByRole("status", { name: "Not installed" })).toBeNull();
     expect(view.getByRole("button", { name: "Test Kokoro TTS" }).hasAttribute("disabled")).toBe(
       true
     );
@@ -143,11 +147,15 @@ describe("engine configuration dashboard", () => {
     const view = render(EngineSetup, { localConfig: config, isDirty: false, onSave: vi.fn() });
     await fireEvent.click(view.getByRole("button", { name: "Test OpenAI" }));
     await installStore.start("kokoro", []);
-    await waitFor(() => expect(view.getByText("Install in progress")).toBeTruthy());
+    await waitFor(() =>
+      expect(view.getByRole("status", { name: "Install in progress" })).toBeTruthy()
+    );
     const run = installStore.run("kokoro");
     if (!run) throw new Error("Expected an installer run");
     run.running = false;
-    await waitFor(() => expect(view.queryByText("Install in progress")).toBeNull());
+    await waitFor(() =>
+      expect(view.queryByRole("status", { name: "Install in progress" })).toBeNull()
+    );
     expect(view.getByRole("button", { name: "Test Edge TTS" }).hasAttribute("disabled")).toBe(true);
     finishTest({ success: true, message: "ok" });
     await waitFor(() =>
@@ -160,9 +168,11 @@ describe("engine configuration dashboard", () => {
     config.tts.openai.api_key = "test-key";
     const view = render(EngineSetup, { localConfig: config, isDirty: false, onSave: vi.fn() });
     await fireEvent.click(view.getByRole("button", { name: "Test OpenAI" }));
-    await waitFor(() => expect(view.getByText("Engine Test Passed")).toBeTruthy());
+    await waitFor(() =>
+      expect(view.getByRole("status", { name: "Engine Test Passed" })).toBeTruthy()
+    );
     await view.rerender({ localConfig: testConfig() });
-    expect(view.queryByText("Engine Test Passed")).toBeNull();
+    expect(view.queryByRole("status", { name: "Engine Test Passed" })).toBeNull();
 
     let finishTest!: (result: { success: boolean; message: string }) => void;
     invokeMock.mockImplementation(async (command: string) => {
@@ -187,7 +197,7 @@ describe("engine configuration dashboard", () => {
       )
     );
     expect(view.queryByText("Stale provider error")).toBeNull();
-    expect(view.queryByText("Engine Test Failed")).toBeNull();
+    expect(view.queryByRole("status", { name: "Engine Test Failed" })).toBeNull();
   });
 
   it("uses one-shot synthesis for installed local engines without saving cloud keys", async () => {

@@ -552,14 +552,12 @@
   "engines": {
     "dashboard": {
       "title": "Engine-Konfiguration",
-      "description": "Cloud-API-Schlüssel eingeben, lokale Installationen verwalten und Engines testen.",
+      "description": "Cloud-API-Schlüssel eingeben, lokale Installationen verwalten und Engines testen. Stimmen und Modelle unter Profile wählen.",
       "filter": "Engines filtern",
-      "all": "Alle Engines",
-      "profileHint": "Stimmen und Modelle unter Profile wählen.",
+      "all": "Alle",
       "engine": "Engine",
-      "configuration": "API-Schlüssel / Installation",
-      "status": "Status",
-      "actions": "Aktionen",
+      "models": "Modelle",
+      "configuration": "Konfiguration",
       "hideKey": "API-Schlüssel verbergen",
       "showKey": "API-Schlüssel anzeigen",
       "installing": "Installation läuft",

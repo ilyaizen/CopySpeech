@@ -13,7 +13,7 @@
   import { toast } from "svelte-sonner";
   import { Download, X, Loader2, Check, AlertCircle, RotateCw, Trash2 } from "@lucide/svelte";
   import { Button } from "#lib/components/ui/button/index.js";
-  import { portal } from "#lib/utils";
+  import { Drawer, DrawerContent, DrawerTitle } from "#lib/components/ui/drawer/index.js";
   import { installStore, type VoiceStatus } from "#lib/stores/install-store.svelte";
   import type { EngineSetupEntry } from "./engine-meta";
   import type { VoiceCatalogEntry, EngineCatalogEntry } from "#lib/types";
@@ -169,148 +169,156 @@
   });
 </script>
 
-<div use:portal class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-  <div class="bg-card border-border flex max-h-[90vh] w-full max-w-xl flex-col rounded-lg border">
-    <div class="border-border flex items-center justify-between border-b p-4">
-      <div>
-        <h3 class="text-lg font-semibold">
-          <span class="capitalize">{engineId}</span> — {$_("engine.setup.install")}
-        </h3>
-        <p class="text-muted-foreground text-sm">{entry.downloadSize ?? ""}</p>
+<Drawer open={true} onOpenChange={(o) => (o ? null : onclose())}>
+  <DrawerContent
+    class="h-[min(85dvh,720px)] max-h-[85dvh] [&>div:first-child]:!hidden"
+    onOpenAutoFocus={(e: Event) => e.preventDefault()}
+  >
+    <DrawerTitle class="sr-only">{engineId} — {$_("engine.setup.install")}</DrawerTitle>
+    <div class="flex min-h-0 flex-1 flex-col">
+      <div class="border-border flex items-center justify-between border-b p-4">
+        <div>
+          <h3 class="text-lg font-semibold">
+            <span class="capitalize">{engineId}</span> — {$_("engine.setup.install")}
+          </h3>
+          <p class="text-muted-foreground text-sm">{entry.downloadSize ?? ""}</p>
+        </div>
+        <Button variant="ghost" size="sm" onclick={onclose}><X size={16} /></Button>
       </div>
-      <Button variant="ghost" size="sm" onclick={onclose}><X size={16} /></Button>
-    </div>
 
-    <div class="flex-1 space-y-3 overflow-y-auto p-4">
-      <p class="text-muted-foreground text-sm">
-        {#if mode === "none"}
-          {isInstalled ? $_("engines.binaryInstalled") : $_("engines.binaryHint")}
-        {:else if mode === "shared"}
-          {isInstalled ? $_("engines.installedAllVoices") : $_("engines.sharedModelHint")}
-        {:else}
-          {$_("engines.piperPerVoiceHint")}
+      <div class="flex-1 space-y-3 overflow-y-auto p-4">
+        <p class="text-muted-foreground text-sm">
+          {#if mode === "none"}
+            {isInstalled ? $_("engines.binaryInstalled") : $_("engines.binaryHint")}
+          {:else if mode === "shared"}
+            {isInstalled ? $_("engines.installedAllVoices") : $_("engines.sharedModelHint")}
+          {:else}
+            {$_("engines.piperPerVoiceHint")}
+          {/if}
+        </p>
+
+        {#if mode !== "none"}
+          <ul class="space-y-1">
+            {#each voices as v (v.id)}
+              {@const st = statusOf(v.id)}
+              <li class="border-border flex items-center gap-2 rounded border px-2 py-1.5 text-sm">
+                {#if mode === "per-voice"}
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4 shrink-0"
+                    disabled={st === "installed" || busy}
+                    checked={selected.has(v.id)}
+                    onchange={() => toggle(v.id)}
+                  />
+                {/if}
+                <span class="min-w-0 flex-1">
+                  <span class="font-medium">{v.label}</span>
+                  <span class="text-muted-foreground ms-1 text-xs">{v.gender ?? ""}</span>
+                </span>
+
+                {#if st === "installed"}
+                  <span
+                    class="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"
+                  >
+                    <Check size={14} />
+                    {$_("engines.voiceInstalled")}
+                  </span>
+                {:else if st === "done"}
+                  <Check size={14} class="text-emerald-500" />
+                {:else if st === "installing" || (st === "pending" && busy)}
+                  <Loader2 size={14} class="text-muted-foreground animate-spin" />
+                {:else if st === "failed"}
+                  <span class="text-destructive inline-flex items-center gap-1 text-xs">
+                    <AlertCircle size={14} />
+                    {#if mode === "per-voice"}
+                      <Button variant="ghost" size="sm" onclick={() => retry(v.id)} disabled={busy}>
+                        <RotateCw size={12} class="me-1" />{$_("engines.retry")}
+                      </Button>
+                    {/if}
+                  </span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
         {/if}
-      </p>
 
-      {#if mode !== "none"}
-        <ul class="space-y-1">
-          {#each voices as v (v.id)}
-            {@const st = statusOf(v.id)}
-            <li class="border-border flex items-center gap-2 rounded border px-2 py-1.5 text-sm">
-              {#if mode === "per-voice"}
-                <input
-                  type="checkbox"
-                  class="h-4 w-4 shrink-0"
-                  disabled={st === "installed" || busy}
-                  checked={selected.has(v.id)}
-                  onchange={() => toggle(v.id)}
-                />
-              {/if}
-              <span class="min-w-0 flex-1">
-                <span class="font-medium">{v.label}</span>
-                <span class="text-muted-foreground ms-1 text-xs">{v.gender ?? ""}</span>
-              </span>
+        {#if supportsCuda}
+          <label class="border-border flex items-start gap-2 rounded border p-3 text-sm">
+            <input type="checkbox" class="mt-0.5 h-4 w-4" bind:checked={cuda} disabled={busy} />
+            <span>
+              <span class="font-medium">{$_("engines.installCuda")}</span>
+              <span class="text-muted-foreground block text-xs"
+                >{$_("engines.installCudaHint")}</span
+              >
+            </span>
+          </label>
+        {/if}
 
-              {#if st === "installed"}
-                <span
-                  class="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"
-                >
-                  <Check size={14} />
-                  {$_("engines.voiceInstalled")}
-                </span>
-              {:else if st === "done"}
-                <Check size={14} class="text-emerald-500" />
-              {:else if st === "installing" || (st === "pending" && busy)}
-                <Loader2 size={14} class="text-muted-foreground animate-spin" />
-              {:else if st === "failed"}
-                <span class="text-destructive inline-flex items-center gap-1 text-xs">
-                  <AlertCircle size={14} />
-                  {#if mode === "per-voice"}
-                    <Button variant="ghost" size="sm" onclick={() => retry(v.id)} disabled={busy}>
-                      <RotateCw size={12} class="me-1" />{$_("engines.retry")}
-                    </Button>
-                  {/if}
-                </span>
-              {/if}
-            </li>
-          {/each}
-        </ul>
-      {/if}
+        {#if confirmingUninstall}
+          <div class="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+            <p class="text-sm text-amber-700 dark:text-amber-400">
+              {$_("engines.uninstallConfirm")}
+            </p>
+            <div class="mt-2 flex gap-2">
+              <Button variant="destructive" size="sm" onclick={startUninstall}>
+                {$_("engines.uninstall")}
+              </Button>
+              <Button variant="outline" size="sm" onclick={() => (confirmingUninstall = false)}>
+                {$_("engine.saveBar.cancel")}
+              </Button>
+            </div>
+          </div>
+        {/if}
 
-      {#if supportsCuda}
-        <label class="border-border flex items-start gap-2 rounded border p-3 text-sm">
-          <input type="checkbox" class="mt-0.5 h-4 w-4" bind:checked={cuda} disabled={busy} />
-          <span>
-            <span class="font-medium">{$_("engines.installCuda")}</span>
-            <span class="text-muted-foreground block text-xs">{$_("engines.installCudaHint")}</span>
-          </span>
-        </label>
-      {/if}
+        {#if run && run.lines.length > 0}
+          <pre
+            bind:this={logRef}
+            class="bg-muted/50 border-border h-40 overflow-auto rounded-md border p-2 font-mono text-[11px] leading-tight whitespace-pre-wrap">{run.lines.join(
+              "\n"
+            )}</pre>
+        {/if}
+      </div>
 
-      {#if confirmingUninstall}
-        <div class="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
-          <p class="text-sm text-amber-700 dark:text-amber-400">
-            {$_("engines.uninstallConfirm")}
-          </p>
-          <div class="mt-2 flex gap-2">
-            <Button variant="destructive" size="sm" onclick={startUninstall}>
+      <div class="border-border flex items-center justify-between gap-2 border-t p-4">
+        <span class="text-muted-foreground text-xs">
+          {#if busy}
+            <Loader2 size={12} class="me-1 inline animate-spin" />{$_("engine.setup.installing")}
+          {:else if finished && run?.exitCode === 0}
+            <Check size={12} class="me-1 inline text-emerald-500" />{$_("engines.installDone")}
+          {:else if finished}
+            <AlertCircle size={12} class="text-destructive me-1 inline" />{$_(
+              "engines.installFailed"
+            )}
+          {/if}
+        </span>
+        <div class="flex gap-2">
+          {#if isInstalled}
+            <Button
+              variant="outline"
+              disabled={busy}
+              onclick={() => (confirmingUninstall = true)}
+              class="text-destructive"
+            >
+              <Trash2 size={14} class="me-2" />
               {$_("engines.uninstall")}
             </Button>
-            <Button variant="outline" size="sm" onclick={() => (confirmingUninstall = false)}>
-              {$_("engine.saveBar.cancel")}
-            </Button>
-          </div>
-        </div>
-      {/if}
-
-      {#if run && run.lines.length > 0}
-        <pre
-          bind:this={logRef}
-          class="bg-muted/50 border-border h-40 overflow-auto rounded-md border p-2 font-mono text-[11px] leading-tight whitespace-pre-wrap">{run.lines.join(
-            "\n"
-          )}</pre>
-      {/if}
-    </div>
-
-    <div class="border-border flex items-center justify-between gap-2 border-t p-4">
-      <span class="text-muted-foreground text-xs">
-        {#if busy}
-          <Loader2 size={12} class="me-1 inline animate-spin" />{$_("engine.setup.installing")}
-        {:else if finished && run?.exitCode === 0}
-          <Check size={12} class="me-1 inline text-emerald-500" />{$_("engines.installDone")}
-        {:else if finished}
-          <AlertCircle size={12} class="text-destructive me-1 inline" />{$_(
-            "engines.installFailed"
-          )}
-        {/if}
-      </span>
-      <div class="flex gap-2">
-        {#if isInstalled}
-          <Button
-            variant="outline"
-            disabled={busy}
-            onclick={() => (confirmingUninstall = true)}
-            class="text-destructive"
-          >
-            <Trash2 size={14} class="me-2" />
-            {$_("engines.uninstall")}
-          </Button>
-        {/if}
-        <Button variant="outline" onclick={onclose}>{$_("common.close")}</Button>
-        <Button
-          onclick={startInstall}
-          disabled={busy || (mode === "per-voice" && selected.size === 0)}
-        >
-          {#if busy}
-            <Loader2 size={14} class="me-2 animate-spin" />
-          {:else}
-            <Download size={14} class="me-2" />
           {/if}
-          {isInstalled && mode !== "per-voice"
-            ? $_("engines.reinstall")
-            : $_("engine.setup.install")}
-        </Button>
+          <Button variant="outline" onclick={onclose}>{$_("common.close")}</Button>
+          <Button
+            onclick={startInstall}
+            disabled={busy || (mode === "per-voice" && selected.size === 0)}
+          >
+            {#if busy}
+              <Loader2 size={14} class="me-2 animate-spin" />
+            {:else}
+              <Download size={14} class="me-2" />
+            {/if}
+            {isInstalled && mode !== "per-voice"
+              ? $_("engines.reinstall")
+              : $_("engine.setup.install")}
+          </Button>
+        </div>
       </div>
     </div>
-  </div>
-</div>
+  </DrawerContent>
+</Drawer>

@@ -14,6 +14,7 @@
     ALL_SETUP_ENTRIES,
     LOCAL_ENGINES,
     type EngineSetupEntry,
+    type RuntimeStatus,
     type TestState
   } from "./engine-meta";
   import type { AppConfig } from "#lib/types";
@@ -31,10 +32,24 @@
     envKeySources?: Record<string, string>;
   } = $props();
 
-  let filter = $state<"all" | "cloud" | "local">("all");
-  const filters = ["all", "local", "cloud"] as const;
+  // "Installed" lists local engines with a verified install. Cloud engines never count.
+  type Filter = "all" | "installed" | "local" | "cloud";
+  const filters = ["all", "installed", "local", "cloud"] as const satisfies readonly Filter[];
+  let filter = $state<Filter>("all");
+
+  // Local-engine probe results, keyed by engine id. `null` while a probe runs.
+  let runtimeStatuses = $state<Record<string, RuntimeStatus | null>>({});
+  let runtimeErrors = $state<Record<string, boolean>>({});
+  const probeRevisions: Record<string, number> = {};
+
   const visibleEntries = $derived(
-    ALL_SETUP_ENTRIES.filter((entry) => filter === "all" || entry.kind === filter)
+    ALL_SETUP_ENTRIES.filter((entry) => {
+      if (filter === "all") return true;
+      if (filter === "installed") {
+        return entry.kind === "local" && runtimeStatuses[entry.id]?.installed === true;
+      }
+      return entry.kind === filter;
+    })
   );
   let activeTest = $state<string | null>(null);
   const testing = $derived(activeTest !== null);
@@ -65,16 +80,33 @@
       untrack(() => clearTest(entry.id));
     });
   }
-  // Bumped whenever an install/uninstall settles so the panel's runtime
-  // status chip (installed / CPU / GPU) re-probes.
+  // Bumped whenever an install/uninstall settles so the runtime probe re-runs.
   let runtimeProbeKey = $state(0);
-  // Non-null opens the streamed install/uninstall dialog for that engine.
+  // Non-null opens the streamed install/uninstall drawer for that engine.
   let installDialogEntry = $state<EngineSetupEntry | null>(null);
+
+  async function probeRuntime(entry: EngineSetupEntry) {
+    const revision = (probeRevisions[entry.id] ?? 0) + 1;
+    probeRevisions[entry.id] = revision;
+    const isCurrent = () => !destroyed && probeRevisions[entry.id] === revision;
+    runtimeStatuses = { ...runtimeStatuses, [entry.id]: null };
+    runtimeErrors = { ...runtimeErrors, [entry.id]: false };
+    try {
+      const status = await invoke<RuntimeStatus>("engine_runtime_status", { engine: entry.id });
+      if (isCurrent()) runtimeStatuses = { ...runtimeStatuses, [entry.id]: status };
+    } catch {
+      if (isCurrent()) runtimeErrors = { ...runtimeErrors, [entry.id]: true };
+    }
+  }
 
   for (const entry of LOCAL_ENGINES) {
     $effect(() => {
       void installStore.isRunning(entry.installerId ?? entry.id);
-      untrack(() => clearTest(entry.id));
+      void runtimeProbeKey;
+      untrack(() => {
+        clearTest(entry.id);
+        void probeRuntime(entry);
+      });
     });
   }
 
@@ -117,7 +149,7 @@
     }
   }
 
-  // Every installable engine goes through the dialog: it owns the streamed
+  // Every installable engine goes through the drawer: it owns the streamed
   // log, the voice picker, and uninstall. Nothing installs fire-and-forget,
   // so a failure can no longer look like a success.
   function runInstall(entry: EngineSetupEntry) {
@@ -138,24 +170,27 @@
   <UvNotice />
 
   <div class="engine-table-wrapper settings-card bg-card rounded-lg border">
-    <div class="flex flex-wrap items-center justify-between gap-3 pb-3">
-      <div
-        class="inline-flex flex-wrap gap-1"
-        role="group"
-        aria-label={$_("engines.dashboard.filter")}
-      >
-        {#each filters as kind (kind)}
-          <Button
-            variant={filter === kind ? "default" : "ghost"}
-            size="sm"
-            aria-pressed={filter === kind}
-            onclick={() => (filter = kind)}
-          >
-            {kind === "all" ? $_("engines.dashboard.all") : $_(`engine.kind.${kind}`)}
-          </Button>
-        {/each}
-      </div>
-      <p class="text-muted-foreground text-xs">{$_("engines.dashboard.profileHint")}</p>
+    <div
+      class="inline-flex flex-wrap gap-1 pb-3"
+      role="group"
+      aria-label={$_("engines.dashboard.filter")}
+    >
+      {#each filters as kind (kind)}
+        <Button
+          variant={filter === kind ? "default" : "ghost"}
+          size="sm"
+          aria-pressed={filter === kind}
+          onclick={() => (filter = kind)}
+        >
+          {#if kind === "installed"}
+            {$_("engines.voiceInstalled")}
+          {:else if kind === "all"}
+            {$_("engines.dashboard.all")}
+          {:else}
+            {$_(`engine.kind.${kind}`)}
+          {/if}
+        </Button>
+      {/each}
     </div>
     <div class="border-border rounded-md border">
       <table
@@ -164,17 +199,14 @@
       >
         <thead class="bg-muted/40 text-muted-foreground text-xs">
           <tr>
-            <th scope="col" class="w-[23%] px-4 py-3 text-start font-medium"
+            <th scope="col" class="w-[22%] px-3 py-2.5 text-start font-medium"
               >{$_("engines.dashboard.engine")}</th
             >
-            <th scope="col" class="w-[35%] px-4 py-3 text-start font-medium"
+            <th scope="col" class="w-[30%] px-3 py-2.5 text-start font-medium"
+              >{$_("engines.dashboard.models")}</th
+            >
+            <th scope="col" class="px-3 py-2.5 text-start font-medium"
               >{$_("engines.dashboard.configuration")}</th
-            >
-            <th scope="col" class="px-4 py-3 text-start font-medium"
-              >{$_("engines.dashboard.status")}</th
-            >
-            <th scope="col" class="px-4 py-3 text-end font-medium"
-              >{$_("engines.dashboard.actions")}</th
             >
           </tr>
         </thead>
@@ -189,7 +221,8 @@
               onTest={() => runTest(entry)}
               onInstall={() => runInstall(entry)}
               onCredentialChange={() => clearTest(entry.id)}
-              {runtimeProbeKey}
+              runtime={runtimeStatuses[entry.id] ?? null}
+              runtimeError={runtimeErrors[entry.id] ?? false}
               {envKeySources}
             />
           {/each}
@@ -247,10 +280,6 @@
       min-width: 0;
       padding: 0;
       text-align: start;
-    }
-
-    .engine-table :global(.engine-actions) {
-      justify-content: flex-start;
     }
   }
 </style>

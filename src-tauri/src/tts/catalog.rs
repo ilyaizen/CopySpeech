@@ -1239,7 +1239,6 @@ pub fn list_engines() -> Vec<EngineCatalogEntry> {
                     vec![
                         "gemini-3.8-flash-tts",
                         "gemini-3.8-flash-lite-tts",
-                        "gemini-2.5-flash-preview-tts",
                     ],
                 ),
                 // Only `wav` is listed: unary replies already carry a WAV header.

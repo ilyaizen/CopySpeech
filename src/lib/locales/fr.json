@@ -552,14 +552,12 @@
   "engines": {
     "dashboard": {
       "title": "Configuration des moteurs",
-      "description": "Configurez les clés API, gérez les installations locales et testez chaque moteur.",
+      "description": "Configurez les clés API, gérez les installations locales et testez chaque moteur. Choisissez les voix et modèles dans Profils.",
       "filter": "Filtrer les moteurs",
-      "all": "Tous les moteurs",
-      "profileHint": "Choisissez les voix et modèles dans Profils.",
+      "all": "Tous",
       "engine": "Moteur",
-      "configuration": "Clé API / installation",
-      "status": "État",
-      "actions": "Actions",
+      "models": "Modèles",
+      "configuration": "Configuration",
       "hideKey": "Masquer la clé API",
       "showKey": "Afficher la clé API",
       "installing": "Installation en cours",

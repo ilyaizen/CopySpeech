@@ -552,14 +552,12 @@
   "engines": {
     "dashboard": {
       "title": "Engine configuration",
-      "description": "Set cloud API keys, manage local installs, and test each engine.",
+      "description": "Set cloud API keys, manage local installs, and test each engine. Choose voices and models in Profiles.",
       "filter": "Filter engines",
-      "all": "All engines",
-      "profileHint": "Choose voices and models in Profiles.",
+      "all": "All",
       "engine": "Engine",
-      "configuration": "API key / installation",
-      "status": "Status",
-      "actions": "Actions",
+      "models": "Models",
+      "configuration": "Configuration",
       "hideKey": "Hide API key",
       "showKey": "Show API key",
       "installing": "Install in progress",
