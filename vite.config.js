@@ -29,10 +29,16 @@ const agentToolingIgnores = [
   "src/lib/components/ui/**/index.ts"
 ];
 
+// Bundles that copyspeech-hermes/build.mjs writes from src/. Formatting them breaks the freshness check.
+const generatedHermesBundles = [
+  "copyspeech-hermes/plugin.js",
+  "copyspeech-hermes/test/under-test.mjs"
+];
+
 // https://vite.dev/config/
 export default defineConfig({
   lint: {
-    ignorePatterns: agentToolingIgnores,
+    ignorePatterns: [...agentToolingIgnores, ...generatedHermesBundles],
     jsPlugins: [
       { name: "vite-plus", specifier: "vite-plus/oxlint-plugin" },
       { name: "anti-slop", specifier: "./tools/oxlint/anti-slop/index.ts" }
@@ -82,7 +88,8 @@ export default defineConfig({
       ".obsidian/",
       "src-tauri/",
       ".planning/",
-      ...agentToolingIgnores
+      ...agentToolingIgnores,
+      ...generatedHermesBundles
     ]
   },
   plugins: lazyPlugins(() => [
