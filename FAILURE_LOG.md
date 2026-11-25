@@ -263,7 +263,12 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 - Install the plugin through a junction (`New-Item -ItemType Junction`) so the watcher hot-reloads repo edits.
 - Before tuning plugin alignment, check the app log for the missed fragment's `Clamped` line. A missing line means the engine never delivered captions for it.
 - Run `bunx vp fmt` before writing a regex that strips the SDK import. The formatter splits long imports across lines.
-- Write guards without `typeof` (`Array.isArray`, `String(x) === x`, `??`). Keep helpers in `plugin.js`: the loader rejects relative imports.
+- Write guards without `typeof` (`Array.isArray`, `String(x) === x`, `??`). Edit `copyspeech-hermes/src/` and run `bun copyspeech-hermes/build.mjs`: the loader reads only `plugin.js` and rejects relative imports.
+- Pin an auto-read's caption run to the reply that matched first. The newest reply is often a later turn that is still streaming.
+- Check a token's text and offsets against its live text node before building a Range. A Markdown re-render can shorten the node in place, and `setEnd` then throws.
+- Build a merged code token's range from its first and last text nodes. One node's offset cannot reach the other node.
+- Count live `/status` reports as activity in the caption run's silence timer. Counting only aligned words ends a long reading that does not align.
+- Catch paint errors inside each poll. An exception in a `.then` callback becomes an unhandled rejection on every 120 ms tick.
 - Re-check focus and settings when a `/status` response lands, not only before the request.
 - Use `scrollTo` behavior `instant` for Reduce Motion, not `auto`.
 - Inject manual playback UI into the chat DOM (host hover row `.aui-message-actions-desktop` inside `[data-slot="aui_msg-actions"]`). Verify the selector against the RUNNING build's renderer chunks.
@@ -271,6 +276,9 @@ Area gotchas from shipped work, one imperative line each. `AGENTS.md` keeps the 
 - Gate the injected UI on `window.MutationObserver !== undefined && window.document !== undefined`. Initialize injected buttons before attachment; prune sync entries after detachment.
 - Accept element-node selection boundaries inside the reply body; a Range does not always start in a text node.
 - Serialize manual starts, not the `wait: true` response. Otherwise a new click cannot stop a blocked earlier reading.
+- Start a status run for every plugin reading, even with captions and follow off. Only the run's poll retires the bar; without it the bar stays until the next reading.
+- Keep the playback owner's poll running when focus moves to another chat. Stop it from painting, not from polling, or the bar never retires.
+- Re-check the stop epoch after waiting on the previous stop. A Stop pressed during that wait must cancel the queued read, or its `/speak` runs and synthesizes after Stop.
 
 ## Claude Code plugin (copyspeech-claude)
 

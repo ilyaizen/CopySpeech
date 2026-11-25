@@ -2,6 +2,8 @@
 
 Reads each new completed assistant reply aloud through the running CopySpeech app, and gives you playback controls: a play button on every reply, a Read aloud pill on any text you select inside a reply, and a playback bar above the chat input.
 
+The 2026-11-25 caption fixes (a reply pinned for auto-read, stale-text guard, poll recovery, live-report keep-alive) pass the Node tests only. They are not yet verified live.
+
 Verified live in the app on 2026-11-16: the highlight moves with speech, excerpt auto-read works, and replies do not replay. The explicit-Save Settings page and follow playback are not yet verified live. The playback controls (message play buttons, selection pill, bar) are new and not yet verified live.
 
 ## Play a reply
@@ -45,13 +47,15 @@ Palette command `CopySpeech: Toggle auto-read` saves at once and changes only th
 
 ## Captions
 
-- Needs CopySpeech running and the reply open in the focused chat.
-- Reads CopySpeech's `GET /status` every 120 ms while a reading plays, for highlights, follow, or the bar. With all off and no reading, the plugin sends no status requests.
+- Needs CopySpeech running and the reply open in the focused chat. Switching to another chat stops the highlight and the follow, but the reading keeps playing and the bar still retires when it ends. Returning to the reply's chat resumes the highlight.
+- Stop (the bar, the reply button, or the palette) cancels the reading in CopySpeech, including a read still queued behind a stop, so no further synthesis runs for it.
+- Reads CopySpeech's `GET /status` every 120 ms while a plugin-started reading plays, for highlights, follow, or the bar. With highlights and follow off, it still polls so the bar retires when the reading ends, but paints nothing. With no reading, it sends no status requests.
 - Paints with the CSS Custom Highlight API (`::highlight(copyspeech-word)`). No Hermes source or bundle is patched. Without that API, plain highlights paint nothing; glide and follow still work.
 - With glide on, a fixed white `mix-blend-mode: difference` pill moves between words in one rAF loop. It follows scroll, clips to every ancestor whose overflow hides or scrolls content and to the viewport, and hides when its word scrolls out of view.
-- A play-button read paints inside that reply. A selection read paints inside the former selection. An automatic read paints inside the newest assistant reply.
+- A play-button read paints inside that reply. A selection read paints inside the former selection. An automatic read paints inside the reply whose words matched first, and keeps that reply when a newer reply streams during the reading.
+- A word whose text changed in place (a Markdown re-render) drops its highlight and aligns again on the next poll. The plugin does not throw on it.
 - Finds the reply's text in the assistant message, skipping reasoning blocks and code blocks.
-- Stops 2 s after the last matched word, or after 60 s with no match. Clears on stop or on disable.
+- Ends when CopySpeech reports the reading inactive twice after a live report. A live report keeps the run going even when its words do not match. Sixty seconds with no report from CopySpeech also ends it. Clears on stop or on disable.
 
 ## Follow playback
 
@@ -71,7 +75,9 @@ Create a junction so the app loads the repo file in place:
 New-Item -ItemType Junction -Path "$env:LOCALAPPDATA\hermes\desktop-plugins\copyspeech-hermes" -Target "D:\Projects\CopySpeech\copyspeech-hermes"
 ```
 
-Edits to `plugin.js` reload in the app. Load errors appear in `desktop.log` as `runtime load failed (copyspeech-hermes)`.
+The source lives in `src/`. After any edit, run `bun copyspeech-hermes/build.mjs` from the repo root. The build writes `plugin.js`, the one file the app loads, and the app reloads it. Load errors appear in `desktop.log` as `runtime load failed (copyspeech-hermes)`.
+
+Tests: `node copyspeech-hermes/plugin.test.mjs` from the repo root. The test first checks that `plugin.js` and `test/under-test.mjs` match a fresh build, and it fails when they do not.
 
 ## Double playback rule
 
